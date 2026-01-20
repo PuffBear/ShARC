@@ -1,0 +1,22 @@
+# Python
+ReMAR_venv/
+.env
+__pycache__/
+*.pyc
+
+# Data
+data_arc/
+eglese/
+gdb/
+instances/
+parsed_gdb_json/
+*.csv
+*.jsonl
+
+# Models
+checkpoints/
+*.pt
+*.bin
+
+# Mac
+.DS_Store
