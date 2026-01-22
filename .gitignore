@@ -4,6 +4,9 @@ ReMAR_venv/
 __pycache__/
 *.pyc
 
+# cache
+cache/
+
 # Data
 data_arc/
 eglese/
