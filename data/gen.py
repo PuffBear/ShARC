@@ -111,7 +111,7 @@ def gen_graph(num_loc, num_arc):
         break
     
     fpath = f'{dir}/{len(req)+len(nonreq)}_{num_loc}_{np.random.randint(0,1000):03d}'
-    np.savez(fpath, req=req, nonreq=nonreq, P=3, M=5, C=capacity)
+    np.savez(fpath, req=req, nonreq=nonreq, P=3, M=2, C=capacity)
     return fpath + '.npz', len(req)+len(nonreq)
 
 
@@ -119,13 +119,18 @@ if __name__ == "__main__":
 
     north, south, east, west = 16.0741, 16.0591, 108.1972, 108.2187
     bbox = (north, south, east, west)
-    try:
-        G_dump = ox.graph_from_bbox(bbox=bbox)
-    except TypeError:
+    cache_path = os.path.join(os.path.dirname(__file__), "osm_cache.graphml")
+    ox.settings.use_cache = True
+    # Avoid setting timeout here; some osmnx versions already pass timeout explicitly.
+    ox.settings.requests_kwargs = dict(getattr(ox.settings, "requests_kwargs", {}) or {})
+    if os.path.isfile(cache_path):
+        G_dump = ox.load_graphml(cache_path)
+    else:
         try:
-            G_dump = ox.graph_from_bbox(bbox)
+            G_dump = ox.graph_from_bbox(bbox=bbox)
         except TypeError:
-            G_dump = ox.graph_from_bbox(north, south, east, west)
+            G_dump = ox.graph_from_bbox(bbox)
+        ox.save_graphml(G_dump, cache_path)
     G_proj = ox.project_graph(G_dump)
 
 
