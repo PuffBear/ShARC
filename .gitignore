@@ -23,5 +23,3 @@ checkpoints/
 
 # Mac
 .DS_Store
-
-data/osm_cache.graphml

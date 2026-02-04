@@ -119,7 +119,7 @@ if __name__ == "__main__":
 
     north, south, east, west = 16.0741, 16.0591, 108.1972, 108.2187
     bbox = (north, south, east, west)
-    cache_path = os.path.join(os.path.dirname(__file__), "osm_cache.graphml")
+    cache_path = os.path.join("data", "osm_cache.graphml")
     ox.settings.use_cache = True
     # Avoid setting timeout here; some osmnx versions already pass timeout explicitly.
     ox.settings.requests_kwargs = dict(getattr(ox.settings, "requests_kwargs", {}) or {})
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     dir = "temp"
     if not os.path.isdir(dir): os.mkdir(dir)
 
-    save = 'instances'
+    save = 'data'
     if not os.path.isdir(save): os.mkdir(save)
     for i in range(6, 20):
         n = 10*i
