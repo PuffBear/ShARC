@@ -1,25 +1,15 @@
 # Python
-ReMAR_venv/
-.env
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# cache
-cache/
-
-# Data
-data_arc/
-eglese/
-gdb/
+# Data and Models
+data/
+experiments/
 instances/
-parsed_gdb_json/
-*.csv
-*.jsonl
-
-# Models
-checkpoints/
 *.pt
-*.bin
+*.npz
+*.png
 
-# Mac
+# OS
 .DS_Store
