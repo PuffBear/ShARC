@@ -1,0 +1,34 @@
+#!/bin/bash
+#PBS -N sharc_step2b_rn_nominal
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=10:00:00
+#PBS -o logs/step2b_rn_nominal.out
+#PBS -e logs/step2b_rn_nominal.err
+# Project code (-P) is passed by submit_all.sh; set PROJECT= there.
+# User: agriya.yadav_ug2023  Host: 10.1.4.95 (ssh sharc)
+
+# ── Step 2b: Nominal risk-neutral agent (φ=0, no shift) ────────────────────
+# Standard REINFORCE, no CVaR, no shift. Checkpoint: experiments/results/rn_nominal/
+# This checkpoint is required by Step 4 (severity sweep).
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Training rn_nominal"
+# Note: first epoch may be slow (~2-3 min) while numba JIT-compiles cal_reward kernels.
+
+python -m training.train \
+    --data_dir  data/test_dataset \
+    --use_shift False \
+    --use_cvar  False \
+    --device    cpu \
+    --run_name  rn_nominal
+
+echo "[$(date)] Done → experiments/results/rn_nominal/best.pt"

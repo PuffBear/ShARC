@@ -1,0 +1,51 @@
+#!/bin/bash
+#PBS -N sharc_step4_sweep
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=04:00:00
+#PBS -o logs/step4_sweep.out
+#PBS -e logs/step4_sweep.err
+# Project code (-P) is passed by submit_all.sh; set PROJECT= there.
+# User: agriya.yadav_ug2023  Host: 10.1.4.95 (ssh sharc)
+
+# ── Step 4: Severity sweep — produces the central paper figure ─────────────
+# Evaluates cvar_shift and rn_nominal at φ ∈ {0, 0.2, 0.4, 0.6, 0.8, 1.0}.
+# Records mean T_max and CVaR_0.1(T_max) per policy per severity level.
+# Output: results/severity_sweep.csv
+#
+# MUST run after step2b (rn_nominal) and step3 (cvar_shift) are complete.
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs results
+
+source ShARCvenv/bin/activate
+
+CVAR_CKPT="experiments/results/cvar_shift/best.pt"
+RN_CKPT="experiments/results/rn_nominal/best.pt"
+
+# Guard: fail early if checkpoints are missing
+if [ ! -f "$CVAR_CKPT" ]; then
+    echo "ERROR: missing $CVAR_CKPT — ensure step3 completed successfully" >&2
+    exit 1
+fi
+if [ ! -f "$RN_CKPT" ]; then
+    echo "ERROR: missing $RN_CKPT — ensure step2b completed successfully" >&2
+    exit 1
+fi
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Sweeping φ ∈ {0, 0.2, 0.4, 0.6, 0.8, 1.0}"
+
+python -m evaluation.severity_sweep \
+    --eval_dir   data/eval_dataset \
+    --cvar_ckpt  "$CVAR_CKPT" \
+    --rn_ckpt    "$RN_CKPT" \
+    --out_csv    results/severity_sweep.csv \
+    --batch_size 32 \
+    --seed       42 \
+    --device     cpu
+
+echo "[$(date)] Done → results/severity_sweep.csv"

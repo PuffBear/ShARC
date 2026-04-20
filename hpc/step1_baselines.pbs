@@ -1,0 +1,37 @@
+#!/bin/bash
+#PBS -N sharc_step1_baselines
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=12:00:00
+#PBS -o logs/step1_baselines.out
+#PBS -e logs/step1_baselines.err
+# Project code (-P) is passed by submit_all.sh; set PROJECT= there.
+# User: agriya.yadav_ug2023  Host: 10.1.4.95 (ssh sharc)
+
+# ── Step 1: Baseline floor (ILS, EA, ACO) ──────────────────────────────────
+# Runs ILS, EA, and ACO on the eval dataset. Blocks nothing downstream;
+# outputs results/baseline_results.csv as a reference floor for all figures.
+# Add --run_lp if Gurobi is available on this node.
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs results
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Starting baseline sweep on data/eval_dataset"
+
+python run_all_baselines.py \
+    --path           data/eval_dataset \
+    --out_csv        results/baseline_results.csv \
+    --ils_num_sample 20 \
+    --ea_epochs      100 \
+    --ea_pop         200 \
+    --aco_epochs     100 \
+    --aco_ants       50  \
+    --seed           42
+
+echo "[$(date)] Done → results/baseline_results.csv"

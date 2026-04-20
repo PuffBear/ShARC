@@ -1,0 +1,41 @@
+#!/bin/bash
+#PBS -N sharc_step3_cvar_shift
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=16:00:00
+#PBS -o logs/step3_cvar_shift.out
+#PBS -e logs/step3_cvar_shift.err
+# Project code (-P) is passed by submit_all.sh; set PROJECT= there.
+# User: agriya.yadav_ug2023  Host: 10.1.4.95 (ssh sharc)
+
+# ── Step 3: Shift training — the main contribution ─────────────────────────
+# CVaR-REINFORCE with curriculum shift scheduling.
+# Checkpoint: experiments/results/cvar_shift/best.pt
+# This checkpoint is required by Step 4 (severity sweep).
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Training cvar_shift (curriculum, warmup=1000)"
+# Note: first epoch may be slow (~2-3 min) while numba JIT-compiles cal_reward kernels.
+
+python -m training.train \
+    --data_dir         data/test_dataset \
+    --use_shift        True \
+    --use_cvar         True \
+    --alpha            0.1 \
+    --shift_mode       curriculum \
+    --shift_warmup     1000 \
+    --max_demand_shift 0.3 \
+    --max_cost_shift   0.3 \
+    --min_availability 0.7 \
+    --device           cpu \
+    --run_name         cvar_shift
+
+echo "[$(date)] Done → experiments/results/cvar_shift/best.pt"

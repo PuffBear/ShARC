@@ -1,0 +1,34 @@
+#!/bin/bash
+#PBS -N sharc_step2a_cvar_nominal
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=10:00:00
+#PBS -o logs/step2a_cvar_nominal.out
+#PBS -e logs/step2a_cvar_nominal.err
+# Project code (-P) is passed by submit_all.sh; set PROJECT= there.
+# User: agriya.yadav_ug2023  Host: 10.1.4.95 (ssh sharc)
+
+# ── Step 2a: Nominal CVaR agent (φ=0, no shift) ────────────────────────────
+# CVaR-REINFORCE, no distribution shift. Checkpoint: experiments/results/cvar_nominal/
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Training cvar_nominal"
+# Note: first epoch may be slow (~2-3 min) while numba JIT-compiles cal_reward kernels.
+
+python -m training.train \
+    --data_dir  data/test_dataset \
+    --use_shift False \
+    --use_cvar  True \
+    --alpha     0.1 \
+    --device    cpu \
+    --run_name  cvar_nominal
+
+echo "[$(date)] Done → experiments/results/cvar_nominal/best.pt"
