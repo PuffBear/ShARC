@@ -1,5 +1,5 @@
-numpy>=2.0
-networkx>=3.2
-numba>=0.59
-torch>=2.2
+numpy>=1.21
+networkx>=2.6
+numba>=0.53
+torch>=1.12
 gurobipy>=10.0
