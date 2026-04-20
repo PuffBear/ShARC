@@ -1,25 +1,26 @@
 """
-REINFORCE training for HCARPPolicy.
+REINFORCE and CVaR-REINFORCE training for HCARPPolicy.
 
-Algorithm (Kool et al. Attention Model, NeurIPS 2019):
-  For each epoch:
-    1. Sample a batch of instances.
-    2. Stochastic rollout  → log_probs [B,T], reward [B]
-    3. Greedy rollout      → baseline  [B]       (same instances, no grad)
-    4. Advantage = reward - baseline
-    5. Loss = -mean( advantage * log_probs.sum(dim=1) )
-    6. Backward + gradient clip + Adam step.
+Risk-neutral (default):
+    Maximises E[R] via standard REINFORCE with greedy baseline.
+
+CVaR mode (use_cvar=True):
+    Maximises CVaR_α[R] — the expected reward in the worst α-fraction of episodes.
+    Gradient weights come only from tail instances; baseline is the CVaR of the
+    greedy rollout (Tamar et al., 2015; Bäuerle & Ott, 2011).
 
 Usage:
     python -m training.train
+    python -m training.train --use_cvar True --alpha 0.1
     python -m training.train --data_dir data/my_instances --n_epochs 500
 """
+
+from __future__ import annotations
 
 import argparse
 import os
 import random
 import time
-from copy import deepcopy
 from glob import glob
 
 import numpy as np
@@ -41,7 +42,6 @@ def set_seed(seed: int):
 
 
 def scan_instances(data_dir: str) -> list[str]:
-    """Return sorted list of all .npz paths under data_dir."""
     files = sorted(glob(os.path.join(data_dir, "**", "*.npz"), recursive=True))
     assert files, f"No .npz files found under {data_dir}"
     return files
@@ -52,15 +52,34 @@ def split_files(files: list[str], val_split: float, seed: int):
     shuffled = files[:]
     rng.shuffle(shuffled)
     n_val = max(1, int(len(shuffled) * val_split))
-    return shuffled[n_val:], shuffled[:n_val]   # train, val
+    return shuffled[n_val:], shuffled[:n_val]
 
 
 def make_batches(files: list[str], batch_size: int, shuffle: bool = True) -> list[list[str]]:
-    """Split files into batches of fixed size."""
     if shuffle:
         files = files[:]
         random.shuffle(files)
-    return [files[i : i + batch_size] for i in range(0, len(files), batch_size)]
+        
+    # HCARPEnv requires static batch np.stack, so group strictly by length
+    from common.ops import import_instance
+    groups = {}
+    for f in files:
+        try:
+            sz = int(np.load(f)['req'].shape[0])
+        except Exception:
+            sz = 0
+        if sz not in groups:
+            groups[sz] = []
+        groups[sz].append(f)
+        
+    batches = []
+    for g_files in groups.values():
+        for i in range(0, len(g_files), batch_size):
+            batches.append(g_files[i : i + batch_size])
+            
+    if shuffle:
+        random.shuffle(batches)
+    return batches
 
 
 def save_checkpoint(policy: HCARPPolicy, path: str):
@@ -73,6 +92,57 @@ def load_checkpoint(policy: HCARPPolicy, path: str):
 
 
 # ---------------------------------------------------------------------------
+# CVaR loss
+# ---------------------------------------------------------------------------
+
+def cvar_loss(
+    rewards: torch.Tensor,
+    baseline: torch.Tensor,
+    log_prob_sum: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    """
+    CVaR-REINFORCE loss (Tamar et al. 2015).
+
+    Computes the policy gradient estimator that maximises CVaR_α[R]:
+      ∇CVaR_α ≈ (1/α·B) · Σ_{i: R_i ≤ VaR_α} (R_i − CVaR_α[baseline]) · ∇log π_i
+
+    Parameters
+    ----------
+    rewards      : [B]  stochastic rollout rewards
+    baseline     : [B]  greedy rollout rewards (no grad)
+    log_prob_sum : [B]  sum of log-probs over the stochastic trajectory
+    alpha        : CVaR confidence level (fraction of worst episodes)
+
+    Returns
+    -------
+    Scalar loss (negate to maximise CVaR).
+    """
+    B = rewards.size(0)
+    n_tail = max(1, int(alpha * B))
+
+    # VaR: alpha-quantile from the bottom (lowest reward = worst outcome)
+    sorted_rew, indices = torch.sort(rewards)
+    var_alpha = sorted_rew[n_tail - 1]
+
+    # CVaR of the greedy baseline for a consistent advantage estimate
+    sorted_base, _ = torch.sort(baseline)
+    cvar_baseline = sorted_base[:n_tail].mean()
+
+    # Exact masking: perfectly n_tail elements tracking exactly the lowest instances
+    tail_mask = torch.zeros_like(rewards)
+    tail_mask[indices[:n_tail]] = 1.0  # [B]
+
+    # Advantage for tail instances only
+    advantage = (rewards - cvar_baseline).detach()  # [B]
+
+    # CVaR policy gradient weights: 1/(α·B) for tail, 0 otherwise
+    cvar_weights = tail_mask / (alpha * float(B))
+
+    return -(cvar_weights * advantage * log_prob_sum).sum()
+
+
+# ---------------------------------------------------------------------------
 # Single training step
 # ---------------------------------------------------------------------------
 
@@ -82,34 +152,35 @@ def train_batch(
     files: list[str],
     max_grad_norm: float,
     device: str,
+    shift_scheduler=None,
+    use_cvar: bool = False,
+    alpha: float = 0.1,
 ) -> dict:
     """
-    Run one REINFORCE update on a batch of instances.
-
-    Returns a dict of scalar metrics.
+    Run one REINFORCE (or CVaR-REINFORCE) update on a batch of instances.
     """
-    env = HCARPEnv()
+    env = HCARPEnv(shift_scheduler=shift_scheduler)
     env.load_files(files)
 
     # --- Stochastic rollout (with gradient) ---
     env.reset()
     _, log_probs, rewards, _ = policy.rollout(env, greedy=False)
-    # log_probs: [B, T]   rewards: [B]
 
     # --- Greedy baseline (no gradient) ---
     env.reset()
     with torch.no_grad():
         _, _, baseline, _ = policy.rollout(env, greedy=True)
-    # baseline: [B]
 
-    # --- REINFORCE loss ---
-    advantage = (rewards - baseline).detach()   # [B]
-    # Normalise advantage for stability
-    if advantage.std() > 1e-8:
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+    log_prob_sum = log_probs.sum(dim=1)  # [B]
 
-    log_prob_sum = log_probs.sum(dim=1)          # [B]
-    loss = -(advantage * log_prob_sum).mean()
+    # --- Loss ---
+    if use_cvar:
+        loss = cvar_loss(rewards, baseline, log_prob_sum, alpha)
+    else:
+        advantage = (rewards - baseline).detach()
+        if advantage.std() > 1e-8:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+        loss = -(advantage * log_prob_sum).mean()
 
     # --- Backward ---
     optimizer.zero_grad()
@@ -118,11 +189,10 @@ def train_batch(
     optimizer.step()
 
     return dict(
-        loss       = float(loss),
-        reward     = float(rewards.mean()),
-        baseline   = float(baseline.mean()),
-        advantage  = float(advantage.mean()),
-        grad_norm  = float(grad_norm),
+        loss      = float(loss),
+        reward    = float(rewards.mean()),
+        baseline  = float(baseline.mean()),
+        grad_norm = float(grad_norm),
     )
 
 
@@ -135,15 +205,12 @@ def validate(
     policy: HCARPPolicy,
     files: list[str],
     batch_size: int,
+    shift_scheduler=None,
 ) -> dict:
-    """
-    Greedy rollout on the full validation set.
-    Returns mean reward and mean T1/T2/T3.
-    """
     all_rewards, T1s, T2s, T3s = [], [], [], []
 
     for batch in make_batches(files, batch_size, shuffle=False):
-        env = HCARPEnv()
+        env = HCARPEnv(shift_scheduler=shift_scheduler)
         env.load_files(batch)
         env.reset()
         _, _, rewards, info = policy.rollout(env, greedy=True)
@@ -169,12 +236,25 @@ def validate(
 def train(cfg: dict):
     set_seed(cfg["seed"])
 
-    # --- Data ---
+    shift_scheduler = None
+    if cfg.get("use_shift"):
+        from env.shift import ShiftConfig, ShiftScheduler
+        shift_cfg = ShiftConfig(
+            max_demand_shift = cfg.get("max_demand_shift", 0.3),
+            max_cost_shift   = cfg.get("max_cost_shift",   0.3),
+            min_availability = cfg.get("min_availability", 0.7),
+            warmup_steps     = cfg.get("shift_warmup",    1000),
+            mode             = cfg.get("shift_mode",  "curriculum"),
+        )
+        shift_scheduler = ShiftScheduler(shift_cfg, seed=cfg["seed"])
+        print(f"Shift scheduler: {shift_cfg}")
+
     all_files = scan_instances(cfg["data_dir"])
     train_files, val_files = split_files(all_files, cfg["val_split"], cfg["seed"])
     print(f"Instances — train: {len(train_files)}  val: {len(val_files)}")
 
-    # --- Model ---
+    d_shift = cfg.get("d_shift", 8) if cfg.get("use_shift") else 0
+
     policy = HCARPPolicy(
         d_model      = cfg["d_model"],
         n_heads      = cfg["n_heads"],
@@ -182,10 +262,11 @@ def train(cfg: dict):
         d_ff         = cfg["d_ff"],
         d_clss       = cfg["d_clss"],
         clip         = cfg["clip"],
+        d_shift      = d_shift,
         device       = cfg["device"],
     )
     n_params = sum(p.numel() for p in policy.parameters())
-    print(f"Policy parameters: {n_params:,}")
+    print(f"Policy parameters: {n_params:,}  (d_shift={d_shift})")
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg["lr"])
 
@@ -193,7 +274,9 @@ def train(cfg: dict):
     best_path = os.path.join(ckpt_dir, "best.pt")
     best_val_reward = float("-inf")
 
-    print(f"\nStarting training — {cfg['n_epochs']} epochs, batch {cfg['batch_size']}\n")
+    use_cvar = bool(cfg.get("use_cvar", False))
+    alpha    = float(cfg.get("alpha",   0.1))
+    print(f"Objective: {'CVaR-REINFORCE (α=' + str(alpha) + ')' if use_cvar else 'REINFORCE'}\n")
 
     for epoch in range(1, cfg["n_epochs"] + 1):
         policy.train()
@@ -205,11 +288,15 @@ def train(cfg: dict):
         for batch_files in batches:
             m = train_batch(
                 policy, optimizer, batch_files,
-                cfg["max_grad_norm"], cfg["device"]
+                cfg["max_grad_norm"], cfg["device"],
+                shift_scheduler=shift_scheduler,
+                use_cvar=use_cvar,
+                alpha=alpha,
             )
             epoch_metrics.append(m)
+            if shift_scheduler is not None:
+                shift_scheduler.advance()
 
-        # Average metrics over all batches in this epoch
         avg = {k: np.mean([m[k] for m in epoch_metrics]) for k in epoch_metrics[0]}
         elapsed = time.time() - t0
 
@@ -222,10 +309,9 @@ def train(cfg: dict):
             f"{elapsed:.1f}s"
         )
 
-        # --- Validation ---
         if epoch % cfg["validate_every"] == 0:
             policy.eval()
-            val = validate(policy, val_files, cfg["batch_size"])
+            val = validate(policy, val_files, cfg["batch_size"], shift_scheduler)
             print(
                 f"  [val] reward {val['val_reward']:10.1f} | "
                 f"T1 {val['val_T1']:.3f}  T2 {val['val_T2']:.3f}  T3 {val['val_T3']:.3f}"
@@ -236,7 +322,6 @@ def train(cfg: dict):
                 save_checkpoint(policy, best_path)
                 print(f"  [val] *** new best — saved to {best_path}")
 
-    # Save final checkpoint
     final_path = os.path.join(ckpt_dir, "final.pt")
     save_checkpoint(policy, final_path)
     print(f"\nTraining complete. Final checkpoint: {final_path}")
@@ -248,7 +333,7 @@ def train(cfg: dict):
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train HCARP REINFORCE policy")
+    parser = argparse.ArgumentParser(description="Train HCARP policy")
     for key, val in CFG.items():
         t = type(val) if val is not None else str
         parser.add_argument(f"--{key}", type=t, default=val)
