@@ -1,6 +1,13 @@
 """
 HCARPPolicy — full encoder-decoder policy for HCARP.
 
+The policy supports:
+  - Budget conditioning: the decoder context includes b_t (running max vehicle time),
+    enabling the policy to reason about its worst-case cost trajectory.
+  - Shift context conditioning (d_shift > 0): a projected shift context vector
+    [delta_demand, delta_cost, p_availability] is appended to the decoder context,
+    allowing the policy to adapt to the current distribution shift.
+
 Usage
 -----
 policy = HCARPPolicy()
@@ -9,12 +16,14 @@ policy = HCARPPolicy()
 arc_emb = policy.encode(obs)          # [B, n+1, d_model]
 
 # Each decoding step: sample action and record log-prob
-action, log_p = policy.act(obs, arc_emb)          # stochastic
-action, log_p = policy.act(obs, arc_emb, greedy=True)  # deterministic
+action, log_p = policy.act(obs, arc_emb)
+action, log_p = policy.act(obs, arc_emb, greedy=True)
 
 # Full episode rollout (returns sequences for REINFORCE)
-actions, log_probs = policy.rollout(env)
+actions, log_probs, rewards, info = policy.rollout(env)
 """
+
+from __future__ import annotations
 
 import numpy as np
 import torch
@@ -42,7 +51,7 @@ def _to_bool(x, device="cpu"):
 
 class HCARPPolicy(nn.Module):
     """
-    Attention-based policy for HCARP.
+    Attention-based policy for HCARP with budget and optional shift conditioning.
 
     Parameters
     ----------
@@ -52,6 +61,7 @@ class HCARPPolicy(nn.Module):
     d_ff          : feed-forward inner dimension
     d_clss        : priority-class embedding dimension
     clip          : tanh clipping range for pointer logits
+    d_shift       : projected shift context dimension (0 = no shift conditioning)
     device        : 'cpu' or 'cuda'
     """
 
@@ -63,11 +73,13 @@ class HCARPPolicy(nn.Module):
         d_ff: int = 512,
         d_clss: int = 16,
         clip: float = 10.0,
+        d_shift: int = 8,
         device: str = "cpu",
     ):
         super().__init__()
 
         self.device = device
+        self.d_shift = d_shift
 
         self.encoder = ArcEncoder(
             d_model=d_model,
@@ -80,7 +92,14 @@ class HCARPPolicy(nn.Module):
             d_model=d_model,
             n_heads=n_heads,
             clip=clip,
+            d_shift=d_shift,
         )
+
+        if d_shift > 0:
+            # Projects the 3-dim shift context into d_shift dims
+            self.shift_proj = nn.Linear(3, d_shift)
+        else:
+            self.shift_proj = None
 
         self.to(device)
 
@@ -92,18 +111,14 @@ class HCARPPolicy(nn.Module):
         """
         Encode static arc features.
 
-        Parameters
-        ----------
-        obs : observation dict from HCARPEnv (numpy arrays or tensors)
-
         Returns
         -------
         arc_emb : [B, n+1, d_model]
         """
         dev = self.device
-        service_time = _to_tensor(obs["service_time"], device=dev)  # [B, n+1]
-        demand       = _to_tensor(obs["demand"],       device=dev)  # [B, n+1]
-        clss         = _to_long(obs["clss"],           device=dev)  # [B, n+1]
+        service_time = _to_tensor(obs["service_time"], device=dev)
+        demand       = _to_tensor(obs["demand"],       device=dev)
+        clss         = _to_long(obs["clss"],           device=dev)
 
         return self.encoder(service_time, demand, clss)  # [B, n+1, d_model]
 
@@ -120,57 +135,60 @@ class HCARPPolicy(nn.Module):
         """
         Select one action per instance given current observation.
 
-        Parameters
-        ----------
-        obs     : current observation dict
-        arc_emb : [B, n+1, d_model] from encode()
-        greedy  : if True use argmax, else sample
-
         Returns
         -------
         actions   : LongTensor  [B]
-        log_probs : FloatTensor [B]  — log prob of the selected action
+        log_probs : FloatTensor [B]
         """
         dev = self.device
         B = arc_emb.size(0)
 
-        cur_arc       = _to_long(obs["cur_arc"],       device=dev)  # [B, M]
-        remaining_cap = _to_tensor(obs["remaining_cap"], device=dev) # [B, M]
-        vehicle_time  = _to_tensor(obs["vehicle_time"], device=dev)  # [B, M]
-        active_v      = _to_long(obs["active_vehicle"], device=dev)  # [B]
-        mask          = _to_bool(obs["action_mask"],    device=dev)  # [B, n+1]
+        cur_arc       = _to_long(obs["cur_arc"],         device=dev)  # [B, M]
+        remaining_cap = _to_tensor(obs["remaining_cap"], device=dev)  # [B, M]
+        vehicle_time  = _to_tensor(obs["vehicle_time"],  device=dev)  # [B, M]
+        active_v      = _to_long(obs["active_vehicle"],  device=dev)  # [B]
+        mask          = _to_bool(obs["action_mask"],     device=dev)  # [B, n+1]
+        budget        = _to_tensor(obs["budget"],        device=dev)  # [B]
 
-        # Gather active vehicle's state for each instance in the batch
-        av_idx = active_v.unsqueeze(1)                      # [B, 1]
-        cur_v  = cur_arc.gather(1, av_idx).squeeze(1)       # [B]
-        cap_v  = remaining_cap.gather(1, av_idx).squeeze(1) # [B]
-        time_v = vehicle_time.gather(1, av_idx).squeeze(1)  # [B]
+        # Gather active vehicle's state
+        av_idx = active_v.unsqueeze(1)
+        cur_v  = cur_arc.gather(1, av_idx).squeeze(1)        # [B]
+        cap_v  = remaining_cap.gather(1, av_idx).squeeze(1)  # [B]
+        time_v = vehicle_time.gather(1, av_idx).squeeze(1)   # [B]
 
-        # Embedding of the active vehicle's current arc
         cur_emb = arc_emb[torch.arange(B, device=dev), cur_v]  # [B, d_model]
 
-        # Decoder context: [cur_arc_emb | remaining_cap | vehicle_time]
-        context = torch.cat(
-            [cur_emb, cap_v.unsqueeze(-1), time_v.unsqueeze(-1)], dim=-1
-        )  # [B, d_model + 2]
+        # Build context: [cur_arc_emb | cap | time | budget | (shift_emb)]
+        context_parts = [
+            cur_emb,
+            cap_v.unsqueeze(-1),
+            time_v.unsqueeze(-1),
+            budget.unsqueeze(-1),
+        ]
+
+        if self.d_shift > 0:
+            raw_shift = _to_tensor(
+                obs.get("shift_context", np.zeros((B, 3), dtype=np.float32)),
+                device=dev,
+            )  # [B, 3]
+            shift_emb = self.shift_proj(raw_shift)  # [B, d_shift]
+            context_parts.append(shift_emb)
+
+        context = torch.cat(context_parts, dim=-1)  # [B, d_model + 3 + d_shift]
 
         log_probs_all = self.decoder(arc_emb, context, mask)  # [B, n+1]
 
         if greedy:
-            actions = log_probs_all.argmax(dim=-1)  # [B]
+            actions = log_probs_all.argmax(dim=-1)
         else:
-            # log_probs_all contains log-probabilities — convert to probs for sampling.
-            # (Categorical(logits=...) would double-apply softmax and give wrong distribution.)
             probs = log_probs_all.exp()
             actions = torch.distributions.Categorical(probs=probs).sample()
 
-        # Log-prob of the chosen action
-        selected_log_p = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)  # [B]
-
+        selected_log_p = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)
         return actions, selected_log_p
 
     # ------------------------------------------------------------------
-    # Full episode rollout  (convenience for REINFORCE training)
+    # Full episode rollout
     # ------------------------------------------------------------------
 
     def rollout(
@@ -183,10 +201,10 @@ class HCARPPolicy(nn.Module):
 
         Returns
         -------
-        actions   : LongTensor  [B, T]      — action at each step
-        log_probs : FloatTensor [B, T]      — log-prob at each step
-        rewards   : FloatTensor [B]         — final reward per instance
-        info      : dict                    — T1/T2/T3 per instance
+        actions   : LongTensor  [B, T]
+        log_probs : FloatTensor [B, T]
+        rewards   : FloatTensor [B]
+        info      : dict
         """
         obs = env._get_obs()
         arc_emb = self.encode(obs)
@@ -197,7 +215,7 @@ class HCARPPolicy(nn.Module):
         rewards = torch.zeros(env.B, device=self.device)
         final_info: dict = {}
 
-        for _ in range(env.max_steps() + env.M):  # upper bound on steps
+        for _ in range(env.max_steps() + env.M):
             actions, log_p = self.act(obs, arc_emb, greedy=greedy)
 
             actions_np = actions.cpu().numpy().astype(np.int32)
