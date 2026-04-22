@@ -37,9 +37,10 @@ CFG = dict(
     min_availability  = 0.7,
 
     # --- Logging / checkpointing ---
-    validate_every = 10,
-    checkpoint_dir = "experiments/results",
-    run_name       = "reinforce_default",
+    validate_every    = 10,
+    checkpoint_dir    = "experiments/results",
+    run_name          = "reinforce_default",
+    warm_start_ckpt   = None,   # path to checkpoint for warm-start (None = train from scratch)
 
     # --- Device ---
     device         = "cpu",
