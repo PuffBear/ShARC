@@ -22,9 +22,10 @@ import numpy as np
 class ShiftConfig:
     max_demand_shift: float = 0.3       # max fractional demand change  e.g. 0.3 → ±30%
     max_cost_shift: float = 0.3         # max fractional travel-cost change
+    max_service_shift: float = 0.3      # max fractional service-time change (dominant T_max term)
     min_availability: float = 0.7       # minimum arc-availability probability
     warmup_steps: int = 1000            # curriculum: steps to reach full magnitude
-    mode: str = "curriculum"            # "curriculum" | "uniform"
+    mode: str = "curriculum"            # "curriculum" | "uniform" | "adversarial"
 
 
 class ShiftScheduler:
@@ -38,6 +39,8 @@ class ShiftScheduler:
     """
 
     CONTEXT_DIM = 3  # [delta_demand, delta_cost, p_availability]
+    # Note: delta_service is applied to the env but not included in the policy
+    # context vector — keeping backward compatibility with existing checkpoints.
 
     def __init__(self, config: ShiftConfig | None = None, seed: int | None = None):
         self.cfg = config or ShiftConfig()
@@ -53,7 +56,7 @@ class ShiftScheduler:
     def _magnitude(self) -> float:
         if self.cfg.mode == "curriculum":
             return min(self._step / max(self.cfg.warmup_steps, 1), 1.0)
-        return 1.0  # uniform: always full range
+        return 1.0  # uniform / adversarial: always full range
 
     def sample(self) -> dict:
         """
@@ -67,15 +70,28 @@ class ShiftScheduler:
         mag = self._magnitude()
         cfg = self.cfg
 
-        delta_demand = mag * cfg.max_demand_shift * float(self._rng.uniform(-1.0, 1.0))
-        delta_cost   = mag * cfg.max_cost_shift   * float(self._rng.uniform(-1.0, 1.0))
-        delta_p      = mag * (1.0 - cfg.min_availability) * float(self._rng.uniform(0.0, 1.0))
-        p_avail      = 1.0 - delta_p
+        if cfg.mode == "adversarial":
+            # Eval-only: shifts are always positive (harder problems).
+            # Fixed at max magnitude — no randomness, deterministic sweep.
+            delta_demand  = mag * cfg.max_demand_shift
+            delta_cost    = mag * cfg.max_cost_shift
+            delta_service = mag * cfg.max_service_shift
+        else:
+            delta_demand  = mag * cfg.max_demand_shift  * float(self._rng.uniform(-1.0, 1.0))
+            delta_cost    = mag * cfg.max_cost_shift    * float(self._rng.uniform(-1.0, 1.0))
+            delta_service = mag * cfg.max_service_shift * float(self._rng.uniform(-1.0, 1.0))
 
+        delta_p = mag * (1.0 - cfg.min_availability) * float(self._rng.uniform(0.0, 1.0))
+        p_avail = 1.0 - delta_p
+
+        # Context stays 3-dim for backward compatibility with existing checkpoints.
+        # delta_service is returned separately for the env to apply but is not
+        # included in the policy conditioning vector.
         context = np.array([delta_demand, delta_cost, delta_p], dtype=np.float32)
         return {
             "delta_demand":   delta_demand,
             "delta_cost":     delta_cost,
+            "delta_service":  delta_service,
             "p_availability": p_avail,
             "context":        context,
         }
