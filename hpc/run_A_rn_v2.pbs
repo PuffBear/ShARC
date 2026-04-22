@@ -1,0 +1,41 @@
+#!/bin/bash
+#PBS -N sharc_rn_v2
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=16:00:00
+#PBS -o logs/run_A_rn_v2.out
+#PBS -e logs/run_A_rn_v2.err
+
+# ── Run A: Risk-neutral + shift (control) ───────────────────────────────────
+# Standard REINFORCE with shift augmentation.
+# d_shift=8 so architecture matches CVaR exactly — only the objective differs.
+# Checkpoint: experiments/results/rn_v2/best.pt
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Training rn_v2  (REINFORCE + curriculum shift, d_shift=8)"
+
+python -m training.train \
+    --data_dir         data/test_dataset \
+    --use_shift        True \
+    --use_cvar         False \
+    --shift_mode       curriculum \
+    --shift_warmup     1000 \
+    --max_demand_shift 0.3 \
+    --max_cost_shift   0.3 \
+    --min_availability 0.7 \
+    --n_epochs         200 \
+    --batch_size       32 \
+    --lr               1e-4 \
+    --seed             42 \
+    --device           cpu \
+    --run_name         rn_v2
+
+echo "[$(date)] Done → experiments/results/rn_v2/best.pt"
