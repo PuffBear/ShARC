@@ -21,6 +21,7 @@ Observation dict (all np.ndarray):
 
   Shift context (zero if no shift scheduler):
     shift_context  [B, 3]    f32    [delta_demand, delta_cost, p_availability]
+                                   (delta_service applied to env but not in context vector)
 
   Mask:
     action_mask    [B, n+1]  bool  True = feasible action for active vehicle
@@ -141,14 +142,19 @@ class HCARPEnv:
             for b, sh in enumerate(shifts):
                 dd = sh["delta_demand"]
                 dc = sh["delta_cost"]
+                ds = sh["delta_service"]
                 pa = sh["p_availability"]
 
                 # Demand shift: clamp to [0, 1]; depot stays 0
                 self.demand[b] = np.clip(self.demand[b] * (1.0 + dd), 0.0, 1.0)
                 self.demand[b, 0] = 0.0
 
-                # Cost shift: scale travel times (never go negative)
+                # Cost shift: scale deadhead travel times (never go negative)
                 self.adj[b] = self.adj[b] * max(1.0 + dc, 0.0)
+
+                # Service time shift: dominant T_max term
+                self.service_time[b] = self.service_time[b] * max(1.0 + ds, 0.0)
+                self.service_time[b, 0] = 0.0
 
                 # Task availability: pre-mark unavailable arcs as visited
                 for arc_i in range(1, n + 1):
