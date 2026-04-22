@@ -1,0 +1,43 @@
+#!/bin/bash
+#PBS -N sharc_cvar_v2
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=16:00:00
+#PBS -o logs/run_B_cvar_v2.out
+#PBS -e logs/run_B_cvar_v2.err
+
+# ── Run B: CVaR + shift (treatment) ─────────────────────────────────────────
+# CVaR-REINFORCE (α=0.1) with shift augmentation.
+# d_shift=8 — same architecture as rn_v2. Only the objective differs.
+# Includes gradient fix: tail-std scaling + clamp (no zero-centering).
+# Checkpoint: experiments/results/cvar_v2/best.pt
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Training cvar_v2  (CVaR-REINFORCE α=0.1 + curriculum shift, d_shift=8)"
+
+python -m training.train \
+    --data_dir         data/test_dataset \
+    --use_shift        True \
+    --use_cvar         True \
+    --alpha            0.1 \
+    --shift_mode       curriculum \
+    --shift_warmup     1000 \
+    --max_demand_shift 0.3 \
+    --max_cost_shift   0.3 \
+    --min_availability 0.7 \
+    --n_epochs         200 \
+    --batch_size       32 \
+    --lr               1e-4 \
+    --seed             42 \
+    --device           cpu \
+    --run_name         cvar_v2
+
+echo "[$(date)] Done → experiments/results/cvar_v2/best.pt"
