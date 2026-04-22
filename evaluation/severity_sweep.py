@@ -20,6 +20,12 @@ import csv
 import os
 from glob import glob
 
+
+def _bool(v: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    return v.lower() not in ("false", "0", "no", "off")
+
 import numpy as np
 import torch
 
@@ -58,6 +64,7 @@ def evaluate_at_severity(
     severity: float,
     batch_size: int,
     seed: int,
+    phi_demand_only: bool = False,
 ) -> dict:
     """
     Evaluate policy at a fixed shift severity φ.
@@ -65,13 +72,15 @@ def evaluate_at_severity(
     severity=0 → no shift; severity=1 → maximum shift (φ=1).
     Uses 'uniform' mode so magnitude is constant across the eval set.
 
+    phi_demand_only=True: vary δ_demand and δ_cost only; fix p_availability=1.0 (no arc dropout).
+
     Returns mean T_max and CVaR_0.1(T_max) where T_max = T1 (worst vehicle time).
     """
     cfg = ShiftConfig(
         max_demand_shift = 0.3 * severity,
         max_cost_shift   = 0.3 * severity,
-        min_availability = 1.0 - 0.3 * severity,
-        mode             = "uniform",
+        min_availability = 1.0 if phi_demand_only else 1.0 - 0.3 * severity,
+        mode             = "adversarial",   # fixed positive shift (harder problems)
     )
     scheduler = ShiftScheduler(cfg, seed=seed)
 
@@ -103,20 +112,28 @@ def main():
     parser.add_argument("--cvar_ckpt",  required=True,       help="Path to cvar_shift best.pt checkpoint")
     parser.add_argument("--rn_ckpt",    required=True,       help="Path to rn_nominal best.pt checkpoint")
     parser.add_argument("--out_csv",    default="results/severity_sweep.csv")
-    parser.add_argument("--severities", nargs="+", type=float, default=SEVERITIES,
+    parser.add_argument("--severities", "--phi_levels", nargs="+", type=float, default=SEVERITIES,
                         help="List of φ values to sweep (default: 0 0.2 0.4 0.6 0.8 1.0)")
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--seed",       type=int, default=42)
-    parser.add_argument("--device",     default="cpu")
+    parser.add_argument("--batch_size",      type=int,   default=32)
+    parser.add_argument("--seed",            type=int,   default=42)
+    parser.add_argument("--device",          default="cpu")
+    parser.add_argument("--rn_use_shift",    type=_bool, default=True,
+                        help="True if rn checkpoint was trained with shift (d_shift=8). Default True for rn_shift runs.")
+    parser.add_argument("--phi_demand_only", type=_bool, default=False,
+                        help="Vary δ_demand and δ_cost only; fix p_availability=1.0 (no arc dropout).")
     args = parser.parse_args()
 
     files = sorted(glob(os.path.join(args.eval_dir, "**", "*.npz"), recursive=True))
     assert files, f"No .npz files found under {args.eval_dir}"
     print(f"Eval instances: {len(files)}")
 
+    # Derive readable labels from checkpoint paths (e.g. ".../cvar_v2/best.pt" → "cvar_v2")
+    def _label(path: str) -> str:
+        return os.path.basename(os.path.dirname(path))
+
     policies = {
-        "cvar_shift": (args.cvar_ckpt, True),   # shift-conditioned model
-        "rn_nominal": (args.rn_ckpt,   False),  # risk-neutral, no shift conditioning
+        _label(args.cvar_ckpt): (args.cvar_ckpt, True),
+        _label(args.rn_ckpt):   (args.rn_ckpt,   args.rn_use_shift),
     }
 
     rows = []
@@ -124,7 +141,8 @@ def main():
         print(f"\n=== {name} ({ckpt}) ===")
         policy = load_policy(ckpt, use_shift, args.device)
         for sev in args.severities:
-            m = evaluate_at_severity(policy, files, sev, args.batch_size, args.seed)
+            m = evaluate_at_severity(policy, files, sev, args.batch_size, args.seed,
+                                     phi_demand_only=args.phi_demand_only)
             m["policy"] = name
             rows.append(m)
             print(
