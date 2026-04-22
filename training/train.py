@@ -125,18 +125,26 @@ def cvar_loss(
     sorted_rew, indices = torch.sort(rewards)
     var_alpha = sorted_rew[n_tail - 1]
 
-    # CVaR of the greedy baseline for a consistent advantage estimate
-    sorted_base, _ = torch.sort(baseline)
-    cvar_baseline = sorted_base[:n_tail].mean()
+    # 1. Instance-level advantage exactly like Risk-Neutral.
+    # We must compare stochastic to greedy ON THE SAME GRAPH to isolate routing quality 
+    # from graph difficulty. Subtracting a mean baseline destroys this.
+    advantage = (rewards - baseline).detach()  # [B]
 
-    # Exact masking: perfectly n_tail elements tracking exactly the lowest instances
+    # 2. Base standardisation globally across the batch. 
+    # Because CVaR restricts updates to only ~3 samples, standardising only the tail
+    # destroys the signal (doing it around the tail mean pushes 50% of the tail UP 
+    # and 50% DOWN, even if ALL of them did worse than baseline).
+    # Normalising globally keeps the scale safe (± ~3.0) but preserves absolute signal.
+    if advantage.std() > 1e-8:
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+    
+    # 3. Apply exact tail mask
     tail_mask = torch.zeros_like(rewards)
     tail_mask[indices[:n_tail]] = 1.0  # [B]
 
-    # Advantage for tail instances only
-    advantage = (rewards - cvar_baseline).detach()  # [B]
-
-    # CVaR policy gradient weights: 1/(α·B) for tail, 0 otherwise
+    # CVaR policy gradient weights: 1/(α·B) for tail, 0 otherwise.
+    # cvar_weights already normalises by α·B; use .sum() not .mean() to
+    # avoid the extra ÷B that would shrink the gradient 34x vs RN.
     cvar_weights = tail_mask / (alpha * float(B))
 
     return -(cvar_weights * advantage * log_prob_sum).sum()
@@ -268,6 +276,11 @@ def train(cfg: dict):
     n_params = sum(p.numel() for p in policy.parameters())
     print(f"Policy parameters: {n_params:,}  (d_shift={d_shift})")
 
+    warm_start = cfg.get("warm_start_ckpt", None)
+    if warm_start:
+        load_checkpoint(policy, warm_start)
+        print(f"Warm-start: loaded weights from {warm_start}")
+
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg["lr"])
 
     ckpt_dir  = os.path.join(cfg["checkpoint_dir"], cfg["run_name"])
@@ -332,11 +345,21 @@ def train(cfg: dict):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _bool(v: str) -> bool:
+    """Argparse type for booleans — bool('False') == True is a Python gotcha."""
+    if isinstance(v, bool):
+        return v
+    return v.lower() not in ("false", "0", "no", "off")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train HCARP policy")
     for key, val in CFG.items():
-        t = type(val) if val is not None else str
-        parser.add_argument(f"--{key}", type=t, default=val)
+        if isinstance(val, bool):
+            parser.add_argument(f"--{key}", type=_bool, default=val)
+        else:
+            t = type(val) if val is not None else str
+            parser.add_argument(f"--{key}", type=t, default=val)
     return vars(parser.parse_args())
 
 
