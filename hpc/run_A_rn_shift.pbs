@@ -1,0 +1,43 @@
+#!/bin/bash
+#PBS -N sharc_rn_shift
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=16:00:00
+#PBS -o logs/run_A_rn_shift.out
+#PBS -e logs/run_A_rn_shift.err
+# Project code (-P) is passed by submit_pair.sh; set PROJECT= there.
+# User: agriya.yadav_ug2023  Host: 10.1.4.95 (ssh sharc)
+
+# ── Run A: Risk-neutral + shift (control group) ────────────────────────────
+# Standard REINFORCE, shift augmentation ON, d_shift=8.
+# Identical config to Run B — only use_cvar differs.
+# Checkpoint: experiments/results/rn_shift/best.pt
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Training rn_shift  (REINFORCE + curriculum shift, d_shift=8)"
+
+python -m training.train \
+    --data_dir         data/test_dataset \
+    --use_shift        True \
+    --use_cvar         False \
+    --shift_mode       curriculum \
+    --shift_warmup     1000 \
+    --max_demand_shift 0.3 \
+    --max_cost_shift   0.3 \
+    --min_availability 0.7 \
+    --n_epochs         200 \
+    --batch_size       32 \
+    --lr               1e-4 \
+    --seed             42 \
+    --device           cpu \
+    --run_name         rn_shift
+
+echo "[$(date)] Done → experiments/results/rn_shift/best.pt"
