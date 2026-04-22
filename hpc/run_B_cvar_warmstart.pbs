@@ -1,0 +1,51 @@
+#!/bin/bash
+#PBS -N sharc_cvar_warmstart
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=12:00:00
+#PBS -o logs/run_B_cvar_warmstart.out
+#PBS -e logs/run_B_cvar_warmstart.err
+
+# ── CVaR fine-tune from rn_v2 checkpoint (warm-start) ───────────────────────
+# Initialises from rn_v2/best.pt (val -116K, good routing quality) then
+# fine-tunes with CVaR-REINFORCE to optimise tail performance.
+# Separating "learn to route" (RN) from "optimise tail" (CVaR) gives the
+# CVaR objective a competitive starting point instead of random weights.
+# Checkpoint: experiments/results/cvar_warmstart/best.pt
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs
+
+source ShARCvenv/bin/activate
+
+RN_CKPT="experiments/results/rn_v2/best.pt"
+if [ ! -f "$RN_CKPT" ]; then
+    echo "ERROR: missing $RN_CKPT — run Run A (rn_v2) first" >&2
+    exit 1
+fi
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] CVaR warm-start from $RN_CKPT"
+
+python -m training.train \
+    --data_dir         data/test_dataset \
+    --use_shift        True \
+    --use_cvar         True \
+    --alpha            0.1 \
+    --shift_mode       curriculum \
+    --shift_warmup     1000 \
+    --max_demand_shift 0.3 \
+    --max_cost_shift   0.3 \
+    --min_availability 0.7 \
+    --n_epochs         200 \
+    --batch_size       32 \
+    --lr               1e-4 \
+    --seed             42 \
+    --device           cpu \
+    --warm_start_ckpt  "$RN_CKPT" \
+    --run_name         cvar_warmstart
+
+echo "[$(date)] Done → experiments/results/cvar_warmstart/best.pt"
