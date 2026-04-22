@@ -1,0 +1,52 @@
+#!/bin/bash
+#PBS -N sharc_sweep_v2
+#PBS -q cpu
+#PBS -l select=1:ncpus=8
+#PBS -l walltime=04:00:00
+#PBS -o logs/run_C_sweep_v2.out
+#PBS -e logs/run_C_sweep_v2.err
+
+# ── Run C: Severity sweep (demand+cost only, no arc dropout) ────────────────
+# Evaluates cvar_v2 vs rn_v2 at φ ∈ {0, 0.2, 0.4, 0.6, 0.8, 1.0}.
+# --phi_demand_only True  → min_availability locked at 1.0 so T_max
+# increases with severity (no arc dropout making problems easier).
+# Output: results/severity_sweep_v2.csv
+#
+# MUST run after Run A + Run B complete.
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+mkdir -p logs results
+
+source ShARCvenv/bin/activate
+
+CVAR_CKPT="experiments/results/cvar_v2/best.pt"
+RN_CKPT="experiments/results/rn_v2/best.pt"
+
+# Guard: fail early if checkpoints are missing
+if [ ! -f "$CVAR_CKPT" ]; then
+    echo "ERROR: missing $CVAR_CKPT — ensure Run B completed" >&2
+    exit 1
+fi
+if [ ! -f "$RN_CKPT" ]; then
+    echo "ERROR: missing $RN_CKPT — ensure Run A completed" >&2
+    exit 1
+fi
+
+echo "[$(date)] Node: $(hostname)  CPUs: $(nproc)"
+echo "[$(date)] Python: $(which python)  ($(python --version))"
+echo "[$(date)] Sweeping φ ∈ {0, 0.2, 0.4, 0.6, 0.8, 1.0}  (demand+cost only)"
+
+python -m evaluation.severity_sweep \
+    --eval_dir        data/eval_dataset \
+    --cvar_ckpt       "$CVAR_CKPT" \
+    --rn_ckpt         "$RN_CKPT" \
+    --rn_use_shift    True \
+    --phi_demand_only True \
+    --out_csv         results/severity_sweep_v2.csv \
+    --batch_size      32 \
+    --seed            42 \
+    --device          cpu
+
+echo "[$(date)] Done → results/severity_sweep_v2.csv"
