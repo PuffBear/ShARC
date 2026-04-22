@@ -15,3 +15,7 @@ instances/
 .DS_Store
 generated_dataset.json
 cache/
+logs/
+results/*.csv
+!results/*_v2.csv
+experiments/
