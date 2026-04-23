@@ -1,0 +1,504 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{microtype}
+\usepackage{parskip}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=none,
+}
+
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\title{\textbf{ShARC: Codebase Technical Review}\\
+\large Shift-robust Arc Routing under Capacity Constraints}
+\author{Agriya Yadav}
+\date{April 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Project Overview}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\textbf{ShARC} (also referred to as ReMAR in experiments) addresses the
+\emph{Hierarchical Capacitated Arc Routing Problem} (H-CARP) under distribution
+shifts. The core research question is: can a deep reinforcement learning (RL)
+policy trained with a risk-averse CVaR objective outperform classical heuristics
+and risk-neutral RL policies when demand, cost, or task-availability shift at
+test time?
+
+The repository contains four co-equal components:
+\begin{enumerate}[nosep]
+  \item Classical heuristic and exact solvers as baselines (ILS, EA, ACO, LP).
+  \item A batched, vectorised RL environment modelling H-CARP with shift
+        injection.
+  \item An encoder–decoder neural policy with attention and shift conditioning.
+  \item A training harness implementing both REINFORCE and CVaR-REINFORCE.
+\end{enumerate}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Problem Formulation}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{H-CARP definition}
+
+Given an undirected graph $G=(V,E)$ with depot $v_0$, a fleet of $M$ vehicles
+each with capacity $C$, and a set of \emph{required} arcs $R \subseteq E$
+partitioned into priority classes $P=\{1,2,3\}$, the objective is to find routes
+$\tau_1,\ldots,\tau_M$ such that every arc $e \in R$ is serviced exactly once
+and the \textbf{lexicographic makespan vector} $\mathbf{T}=(T_1,T_2,T_3)$ is
+minimised:
+\begin{equation}
+  T_k = \max_{m=1}^{M}\; \text{completion time of vehicle } m
+  \text{ after servicing all class-}k\text{ arcs.}
+\end{equation}
+Lexicographic minimisation means $T_1$ has strict priority over $T_2$, and $T_2$
+over $T_3$. The scalar proxy used in training is
+$-\!(10^4 T_1 + 10^2 T_2 + T_3)$.
+
+\subsection{Distribution shift model}
+
+At evaluation time the environment applies a \emph{shift} parameterised by
+severity $s \in [0,1]$:
+\begin{align}
+  d_e &\leftarrow d_e\,(1+s\,\delta_d),\quad
+  c_{ij} \leftarrow c_{ij}\,(1+s\,\delta_c), \notag\\
+  \text{arc } e &\text{ unavailable with probability } s\,(1-p_\text{avail}).
+\end{align}
+The shift context vector $(s\,\delta_d,\, s\,\delta_c,\, p_\text{avail})$ is
+passed to the policy decoder, enabling explicit conditioning.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Repository Structure}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Directory / File} & \textbf{Role} \\
+\midrule
+\texttt{baseline/meta.py} & Base class + EA, ACO, cheapest-insertion heuristics \\
+\texttt{baseline/lp.py}   & Gurobi MILP formulation (LP-HCARP) \\
+\texttt{common/ops.py}    & Graph parsing, Floyd--Warshall, instance loading \\
+\texttt{common/cal\_reward.py} & Lexicographic reward (Numba JIT) \\
+\texttt{common/intra.py}, \texttt{inter.py} & 2-opt local search (Numba JIT) \\
+\texttt{models/encoder.py} & Transformer arc encoder \\
+\texttt{models/decoder.py} & Attention pointer decoder \\
+\texttt{models/policy.py} & Full encoder--decoder policy \\
+\texttt{env/hcarp\_env.py} & Batched NumPy RL environment \\
+\texttt{env/shift.py}      & Distribution shift scheduler \\
+\texttt{training/train.py} & REINFORCE \& CVaR-REINFORCE training loop \\
+\texttt{evaluation/}       & Metric computation \& severity sweeps \\
+\texttt{data/}             & Instance generators and datasets \\
+\texttt{results/}          & Experimental outputs (CSV, PNG) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The codebase totals approximately 2,400 lines of Python, with the environment,
+training loop, and baseline module each contributing $\sim$300--370 lines.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Data Format}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+Instances are stored as compressed NumPy archives (\texttt{.npz}) with the
+following schema:
+
+\begin{center}
+\begin{tabular}{lllp{6cm}}
+\toprule
+\textbf{Key} & \textbf{Shape} & \textbf{dtype} & \textbf{Meaning} \\
+\midrule
+\texttt{req}    & $(n_r, 6)$ & float32 & Required arcs: $(u,v,d,p,s,t)$ \\
+\texttt{nonreq} & $(n_t, 6)$ & float32 & Traversal arcs (same columns, $d=p=s=0$) \\
+\texttt{C}      & scalar     & float32 & Vehicle capacity \\
+\texttt{M}      & scalar     & int32   & Fleet size \\
+\texttt{P}      & scalar     & int32   & Number of priority classes (always 3) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Columns: $u,v$ = node indices (depot = 0); $d$ = demand; $p \in \{1,2,3\}$ =
+priority; $s$ = service time; $t$ = travel time. Datasets follow the path
+convention \texttt{data/\{split\}/\{size\}/\{id\}.npz}.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Baseline Solvers}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+All baselines inherit from \texttt{BaseHCARP} (\texttt{baseline/meta.py}), which
+provides instance parsing, feasibility checking, and objective evaluation.
+
+\subsection{Iterative Local Search (ILS)}
+
+Generates 20 random cheapest-insertion tours, applies three rounds of intra- and
+inter-route 2-opt refinement via \texttt{common/local\_search.py}, and returns
+the best solution. Complexity per call: $O(k \cdot n^2)$ where $k=3$ local-search
+rounds.
+
+\subsection{Evolutionary Algorithm (EA)}
+
+A steady-state genetic algorithm with population 200, tournament size 4, mutation
+rate 0.5, and crossover rate 0.9. Crossover is segment-based with capacity
+re-checking; mutation applies a single 2-opt move. Two elites are preserved per
+generation. Runs for 50 epochs by default.
+
+\subsection{Ant Colony Optimisation (ACO)}
+
+50 ants construct probabilistic tours using pheromone matrix $\tau$ and heuristic
+$\eta$ with exponents $\alpha=\beta=1.0$. Pheromone evaporation rate $\rho=0.5$.
+Optional local search after construction. Default 500 epochs.
+
+\subsection{LP-HCARP (Gurobi)}
+
+A mixed-integer linear programme solved by Gurobi with a 600-second wall-clock
+limit. Decision variables:
+\begin{itemize}[nosep]
+  \item $x_{m,a} \in \{0,1\}$: vehicle $m$ services arc $a$.
+  \item $y_{m,a,k} \in \mathbb{Z}_{\geq 0}$: deadhead traversal count.
+  \item $t_{m,k} \in \mathbb{R}_{\geq 0}$: completion time for vehicle $m$ at
+        priority class $k$.
+\end{itemize}
+Subtour elimination is enforced via lazy constraints using NetworkX strongly
+connected component detection. The weighted-sum objective $10^3 T_1 + 10\,T_2 +
+0.1\,T_3$ approximates lexicographic minimisation. Returns \texttt{None} on
+timeout.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Neural Policy}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Architecture}
+
+\texttt{HCARPPolicy} (\texttt{models/policy.py}) is a Transformer encoder–pointer
+decoder:
+
+\paragraph{Encoder (\texttt{ArcEncoder}).}
+Three layers of pre-LN multi-head self-attention ($d_\text{model}=128$, 8 heads,
+$d_\text{ff}=512$). Input features per arc: service time, demand, learned
+priority class embedding ($d_\text{clss}=16$), and a depot indicator flag.
+Output: contextual arc embeddings $\mathbf{H} \in \mathbb{R}^{B \times (n+1)
+\times d_\text{model}}$.
+
+\paragraph{Decoder (\texttt{AttentionDecoder}).}
+A single-step pointer network. At each decision step the context vector is
+\begin{equation}
+  \mathbf{c} = \bigl[\mathbf{h}_{\text{cur}} \;\|\;
+                     \text{rem\_cap} \;\|\;
+                     \text{veh\_time} \;\|\;
+                     \text{budget} \;\|\;
+                     \mathbf{e}_\text{shift}\bigr],
+\end{equation}
+where $\mathbf{e}_\text{shift} \in \mathbb{R}^{d_\text{shift}=8}$ is a learned
+embedding of the shift context. Compatibility logits are
+$u_i = \text{clip}\!\left(\mathbf{q}^\top\mathbf{k}_i / \sqrt{d},\;
+-\text{clip},\;\text{clip}\right)$ with $\text{clip}=10$. Infeasible actions
+receive $-\infty$ before \texttt{log\_softmax}.
+
+\subsection{Policy interface}
+
+\begin{lstlisting}[language=Python]
+policy.encode(obs)           # -> arc_emb [B, n+1, d_model]
+policy.act(obs, arc_emb)     # -> actions [B], log_probs [B]
+policy.rollout(env)          # -> actions [B,T], log_probs [B,T], rewards [B]
+\end{lstlisting}
+
+Greedy decoding (argmax) is used at evaluation; categorical sampling during
+training.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{RL Environment}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\texttt{HCARPEnv} (\texttt{env/hcarp\_env.py}) runs $B$ instances in parallel
+using pure NumPy (no GPU dependency for simulation). The action space is
+$\{0, 1, \ldots, n\}$ where $0$ terminates the current vehicle's route and
+advances to the next. Observations include:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Tensor} & \textbf{Shape} & \textbf{Type} \\
+\midrule
+\texttt{adj}            & $[B, n{+}1, n{+}1]$ & static \\
+\texttt{service\_time}  & $[B, n{+}1]$         & static \\
+\texttt{demand}         & $[B, n{+}1]$         & static \\
+\texttt{clss}           & $[B, n{+}1]$         & static \\
+\texttt{visited}        & $[B, n{+}1]$         & dynamic \\
+\texttt{cur\_arc}       & $[B, M]$             & dynamic \\
+\texttt{remaining\_cap} & $[B, M]$             & dynamic \\
+\texttt{vehicle\_time}  & $[B, M]$             & dynamic \\
+\texttt{budget}         & $[B]$                & dynamic \\
+\texttt{shift\_context} & $[B, 3]$             & context \\
+\texttt{action\_mask}   & $[B, n{+}1]$         & feasibility \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The reward is zero at all intermediate steps; at termination:
+$r = -(10^4 T_1 + 10^2 T_2 + T_3)$.
+
+\subsection{Shift Scheduler}
+
+\texttt{ShiftScheduler} (\texttt{env/shift.py}) supports three modes:
+
+\begin{description}[nosep]
+  \item[\texttt{curriculum}:] Perturbation magnitude grows linearly over
+        \texttt{warmup\_steps} (default 1000) from 0 to maximum
+        $(\pm 30\%$ demand/cost, 30\% task removal).
+  \item[\texttt{uniform}:] Samples $\delta_d, \delta_c, p_\text{avail}$
+        uniformly from fixed ranges.
+  \item[\texttt{adversarial}:] Maximises expected loss (intended for future
+        adversarial training).
+\end{description}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Training Algorithms}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+Both algorithms share the same environment rollout and differ only in how the
+policy gradient is weighted. Let $R_i$ be the stochastic rollout return for
+instance $i$ and $\hat{R}_i$ the greedy (baseline) return.
+
+\subsection{Standard REINFORCE}
+
+\begin{equation}
+  \mathcal{L}_\text{RN} = -\frac{1}{B}\sum_{i=1}^{B}
+  \widetilde{A}_i \cdot \log\pi_\theta(\tau_i),
+  \qquad
+  \widetilde{A}_i = \frac{(R_i - \hat{R}_i) - \mu_A}{\sigma_A}.
+\end{equation}
+
+\subsection{CVaR-REINFORCE}
+
+Only the worst $\alpha$-fraction ($\alpha=0.1$) of trajectories receives
+gradient signal:
+\begin{align}
+  \text{VaR}_\alpha &= \text{quantile}_\alpha\{R_i\}, \\
+  w_i &= \frac{\mathbf{1}[R_i \leq \text{VaR}_\alpha]}{\alpha B}, \\
+  \mathcal{L}_\text{CVaR} &= -\sum_{i=1}^{B} w_i\,
+    \bigl(R_i - \widehat{\text{CVaR}}_\alpha\bigr)\cdot\log\pi_\theta(\tau_i),
+\end{align}
+where $\widehat{\text{CVaR}}_\alpha$ is the CVaR of the greedy baseline (not the
+mean). This concentrates updates on adverse outcomes, training the policy to
+improve its worst-case performance.
+
+\subsection{Training configuration}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Hyperparameter} & \textbf{Value} \\
+\midrule
+Batch size          & 32 instances \\
+Epochs              & 200 \\
+Optimizer           & Adam, $\text{lr}=10^{-4}$ \\
+Gradient clip       & 1.0 \\
+Validation interval & 10 epochs \\
+$d_\text{model}$    & 128 \\
+Attention heads     & 8 \\
+Encoder layers      & 3 \\
+Feed-forward dim    & 512 \\
+$\alpha$ (CVaR)     & 0.1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Local Search}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+All heuristics and post-processing apply 2-opt moves compiled with Numba JIT
+for speed.
+
+\textbf{Intra-route} (\texttt{common/intra.py}): Tries all arc-pair reversals
+within a single vehicle's route; accepts if $\Delta\text{cost} < -\varepsilon$.
+
+\textbf{Inter-route} (\texttt{common/inter.py}): For each pair of vehicles and
+each priority class $k$, tries swapping one arc from each vehicle; accepts if
+cost decreases and capacity remains feasible. Iterates up to
+$\text{EPS}=1000$ rounds.
+
+Two \emph{variants} are supported:
+\begin{itemize}[nosep]
+  \item \textbf{P (Priority):} Optimises each tier sequentially; higher tiers
+        are not degraded.
+  \item \textbf{U (Uniform):} Optimises the lexicographic scalar directly.
+\end{itemize}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Evaluation}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Metrics}
+
+\begin{align}
+  \text{Mean} &= \frac{1}{N}\sum_{i}R_i, \\
+  \text{CVaR}_\alpha &= \mathbb{E}[R \mid R \leq \text{VaR}_\alpha], \\
+  \text{Gap} &= \frac{\text{Baseline obj} - \text{Policy obj}}{\text{Baseline obj}}\times 100\%.
+\end{align}
+
+\subsection{Severity sweep}
+
+\texttt{ShiftEvaluator.sweep} evaluates each policy at eleven severity levels
+$s \in \{0.0, 0.1, \ldots, 1.0\}$ using greedy decoding, producing the CSV
+\texttt{results/severity\_sweep\_v2.csv}. The sweep is the primary benchmark:
+it characterises graceful degradation under increasing distribution shift.
+
+\subsection{Summary of results}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{Mean reward (s=0)} & \textbf{CVaR$_{0.1}$ (s=1)} \\
+\midrule
+ILS             & competitive    & degrades significantly \\
+EA              & competitive    & degrades significantly \\
+ACO             & competitive    & degrades significantly \\
+LP-HCARP        & optimal (slow) & N/A (timeout-prone) \\
+Risk-neutral RL & near-optimal   & degrades $\sim$20\% more than CVaR \\
+CVaR-RL         & near-optimal   & best tail robustness \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At $s=0$ all learned policies match baselines. At $s=1$ CVaR-REINFORCE yields
+$\sim$20\% better CVaR than risk-neutral RL, confirming that tail-risk
+optimisation transfers to distribution-shift robustness.
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Design Decisions and Trade-offs}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{center}
+\begin{tabular}{p{3cm}p{4.5cm}p{5.5cm}}
+\toprule
+\textbf{Decision} & \textbf{Choice} & \textbf{Rationale} \\
+\midrule
+Objective function &
+  Lexicographic $\mathbf{T}=(T_1,T_2,T_3)$ &
+  Hard priority ordering; scalar proxies lose the lexicographic guarantee \\
+Reward shaping &
+  $-10^4 T_1 - 10^2 T_2 - T_3$ &
+  Approximates lexicographic order in a single scalar for gradient flow \\
+Encoder &
+  Transformer self-attention &
+  Captures global arc interactions; naturally handles variable-length instances \\
+Decoder &
+  Pointer network with masking &
+  Encodes feasibility directly; avoids invalid action sampling \\
+Shift conditioning &
+  Explicit shift-context embedding in decoder &
+  Lets policy adapt without distribution mismatch at test time \\
+Risk objective &
+  CVaR-REINFORCE ($\alpha=0.1$) &
+  Concentrates gradient on worst 10\% outcomes; improves tail without hurting mean \\
+Parallelism &
+  Numba JIT for local search &
+  Python-speed reward evaluation was the bottleneck; JIT gives $10\times$+ speedup \\
+Baseline comparison &
+  Greedy rollout (same policy, no sampling) &
+  Isolates routing quality from stochastic variance \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Dependencies}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Package} & \textbf{Role} \\
+\midrule
+\texttt{numpy}      & Dense array operations throughout \\
+\texttt{torch}      & Neural network, Adam, categorical distributions \\
+\texttt{numba}      & JIT compilation for reward and local search loops \\
+\texttt{networkx}   & Shortest paths, SCC detection for LP subtour elimination \\
+\texttt{gurobipy}   & Commercial MILP solver (LP-HCARP baseline) \\
+\texttt{osmnx}      & OpenStreetMap graph extraction for instance generation \\
+\texttt{pandas}     & Results aggregation and CSV I/O \\
+\texttt{matplotlib} & Gantt charts, severity plots \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Identified Issues and Recommendations}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{enumerate}
+
+  \item \textbf{Gurobi dependency.}  The LP baseline requires a commercial
+        licence. Replacing it with an open-source MILP solver (e.g.\ HiGHS via
+        \texttt{scipy.optimize.milp}) would lower the barrier for reproducibility.
+
+  \item \textbf{Numba cold-start overhead.}  JIT compilation adds $\sim$10--30
+        seconds on first call. Ahead-of-time caching (\texttt{@nb.njit(cache=True)})
+        should be enabled uniformly in \texttt{intra.py}, \texttt{inter.py}, and
+        \texttt{cal\_reward.py}.
+
+  \item \textbf{LP timeout with no fallback.}  \texttt{LPHCARP} returns
+        \texttt{None} on timeout; callers in \texttt{run\_all\_baselines.py}
+        should handle this gracefully (e.g.\ fall back to ILS result).
+
+  \item \textbf{Single-seed evaluation.}  The severity sweep results in
+        \texttt{severity\_sweep\_v2.csv} appear to come from a single random seed.
+        Reporting means and standard deviations across at least 5 seeds would
+        strengthen statistical claims.
+
+  \item \textbf{CVaR weight degeneracy.}  When $\alpha B < 1$ (small batches),
+        the CVaR mask may select zero instances. A guard ensuring at least one
+        instance is selected ($\max(1, \lfloor\alpha B\rfloor)$) would prevent
+        silent zero-gradient steps.
+
+  \item \textbf{Adversarial shift mode stub.}  \texttt{ShiftScheduler} exposes an
+        \texttt{"adversarial"} mode but it is not implemented. Either implement it
+        or remove the option to avoid silent no-ops.
+
+  \item \textbf{Missing \texttt{requirements.txt} pinning.}  The file lists
+        package names without version bounds. Pinning (e.g.\ with
+        \texttt{pip-compile}) would make environment reproduction reliable.
+
+\end{enumerate}
+
+%% ─────────────────────────────────────────────────────────────────────────────
+\section{Summary}
+%% ─────────────────────────────────────────────────────────────────────────────
+
+ShARC is a well-structured, research-grade codebase of $\sim$2,400 lines that
+cleanly separates concerns across environment, model, training, evaluation, and
+baselines. The core algorithmic contribution---CVaR-REINFORCE with explicit
+shift conditioning---is correctly implemented and shows measurable tail-robustness
+gains at high severity. The Numba-accelerated local search is a practical
+engineering strength. The main weaknesses are a hard Gurobi dependency, single-seed
+evaluation, and a handful of unguarded edge cases in the CVaR weighting and LP
+fallback logic. Addressing these would bring the codebase to publication-ready
+quality.
+
+\end{document}
