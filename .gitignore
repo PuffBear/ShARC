@@ -19,3 +19,9 @@ logs/
 results/*.csv
 !results/*_v2.csv
 experiments/
+
+# LaTeX Build Files
+*.aux
+*.log
+*.out
+*.toc
