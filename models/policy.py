@@ -74,6 +74,7 @@ class HCARPPolicy(nn.Module):
         d_clss: int = 16,
         clip: float = 10.0,
         d_shift: int = 8,
+        use_budget_signal: bool = True,
         device: str = "cpu",
     ):
         super().__init__()
@@ -93,6 +94,7 @@ class HCARPPolicy(nn.Module):
             n_heads=n_heads,
             clip=clip,
             d_shift=d_shift,
+            use_budget_signal=use_budget_signal,
         )
 
         if d_shift > 0:
