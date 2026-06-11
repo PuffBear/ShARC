@@ -19,13 +19,24 @@ def parse_args():
     
     return parser.parse_args()
 
+import concurrent.futures
+
+def process_file(f, args):
+    al = ACOHCARP(n_ant=args.n_ant)
+    al.import_instance(f)
+    t1 = time()
+    res = al(n_epoch=args.max_epoch, variant=args.variant)
+    return f, res, time() - t1
+
 if __name__ == "__main__":
     args = parse_args()
     np.random.seed(args.seed)
     files = sorted(glob(args.path + '/*/*.npz'))
     
-    al = ACOHCARP(n_ant=args.n_ant) # ACO
-    for f in files:
-        al.import_instance(f)
-        t1 = time()
-        print(f,':::', al(n_epoch=args.max_epoch, variant=args.variant),':::', time() - t1)
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=min(os.cpu_count() or 8, 8), mp_context=ctx) as pool:
+        futures = [pool.submit(process_file, f, args) for f in files]
+        for fut in concurrent.futures.as_completed(futures):
+            f, res, dt = fut.result()
+            print(f, ':::', res, ':::', dt)
