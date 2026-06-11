@@ -52,7 +52,7 @@ def load_policy(ckpt_path: str, use_shift: bool, device: str) -> HCARPPolicy:
         d_shift      = d_shift,
         device       = device,
     )
-    policy.load_state_dict(torch.load(ckpt_path, map_location=device))
+    policy.load_state_dict(torch.load(ckpt_path, map_location=device), strict=use_shift)
     policy.eval()
     return policy
 
@@ -77,10 +77,11 @@ def evaluate_at_severity(
     Returns mean T_max and CVaR_0.1(T_max) where T_max = T1 (worst vehicle time).
     """
     cfg = ShiftConfig(
-        max_demand_shift = 0.3 * severity,
-        max_cost_shift   = 0.3 * severity,
-        min_availability = 1.0 if phi_demand_only else 1.0 - 0.3 * severity,
-        mode             = "adversarial",   # fixed positive shift (harder problems)
+        max_demand_shift  = 0.3 * severity,
+        max_cost_shift    = 0.3 * severity,
+        max_service_shift = 0.3 * severity,  # must scale with severity; default 0.3 would leak at φ=0
+        min_availability  = 1.0 if phi_demand_only else 1.0 - 0.3 * severity,
+        mode              = "adversarial",   # fixed positive shift (harder problems)
     )
     scheduler = ShiftScheduler(cfg, seed=seed)
 
@@ -115,19 +116,20 @@ def main():
     parser.add_argument("--severities", "--phi_levels", nargs="+", type=float, default=SEVERITIES,
                         help="List of φ values to sweep (default: 0 0.2 0.4 0.6 0.8 1.0)")
     parser.add_argument("--batch_size",      type=int,   default=32)
-    parser.add_argument("--seed",            type=int,   default=42)
+    parser.add_argument("--n_seeds",         type=int,   default=5,
+                        help="Number of random seeds to evaluate for robust confidence intervals")
+    parser.add_argument("--seed_start",      type=int,   default=42)
     parser.add_argument("--device",          default="cpu")
     parser.add_argument("--rn_use_shift",    type=_bool, default=True,
-                        help="True if rn checkpoint was trained with shift (d_shift=8). Default True for rn_shift runs.")
+                        help="True if rn checkpoint was trained with shift (d_shift=8).")
     parser.add_argument("--phi_demand_only", type=_bool, default=False,
                         help="Vary δ_demand and δ_cost only; fix p_availability=1.0 (no arc dropout).")
     args = parser.parse_args()
 
     files = sorted(glob(os.path.join(args.eval_dir, "**", "*.npz"), recursive=True))
     assert files, f"No .npz files found under {args.eval_dir}"
-    print(f"Eval instances: {len(files)}")
+    print(f"Eval instances: {len(files)}, Sweeping {args.n_seeds} random seeds per severity.")
 
-    # Derive readable labels from checkpoint paths (e.g. ".../cvar_v2/best.pt" → "cvar_v2")
     def _label(path: str) -> str:
         return os.path.basename(os.path.dirname(path))
 
@@ -141,24 +143,40 @@ def main():
         print(f"\n=== {name} ({ckpt}) ===")
         policy = load_policy(ckpt, use_shift, args.device)
         for sev in args.severities:
-            m = evaluate_at_severity(policy, files, sev, args.batch_size, args.seed,
-                                     phi_demand_only=args.phi_demand_only)
-            m["policy"] = name
+            sev_means = []
+            sev_cvars = []
+            
+            for s_idx in range(args.n_seeds):
+                seed = args.seed_start + s_idx
+                metrics = evaluate_at_severity(policy, files, sev, args.batch_size, seed,
+                                               phi_demand_only=args.phi_demand_only)
+                sev_means.append(metrics["mean_T_max"])
+                sev_cvars.append(metrics["cvar_T_max"])
+            
+            m = {
+                "policy": name,
+                "severity": sev,
+                "mean_T_max": float(np.mean(sev_means)),
+                "std_T_max":  float(np.std(sev_means)),
+                "cvar_T_max": float(np.mean(sev_cvars)),
+                "std_cvar_T_max": float(np.std(sev_cvars)),
+                "n_instances": len(files),
+                "n_seeds": args.n_seeds
+            }
             rows.append(m)
             print(
-                f"  φ={sev:.1f}  mean_T_max={m['mean_T_max']:.4f}"
-                f"  CVaR_0.1(T_max)={m['cvar_T_max']:.4f}  n={m['n']}"
+                f"  φ={sev:.1f}  mean={m['mean_T_max']:.2f}±{m['std_T_max']:.2f}  "
+                f"CVaR={m['cvar_T_max']:.2f}±{m['std_cvar_T_max']:.2f}"
             )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out_csv)), exist_ok=True)
-    fieldnames = ["policy", "severity", "mean_T_max", "cvar_T_max", "n"]
+    fieldnames = ["policy", "severity", "mean_T_max", "std_T_max", "cvar_T_max", "std_cvar_T_max", "n_instances", "n_seeds"]
     with open(args.out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        w.writerows({k: row[k] for k in fieldnames} for row in rows)
+        w.writerows(rows)
 
     print(f"\nSaved: {args.out_csv}")
-
 
 if __name__ == "__main__":
     main()
