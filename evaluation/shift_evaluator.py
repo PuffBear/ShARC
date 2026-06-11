@@ -54,10 +54,11 @@ class ShiftEvaluator:
         Uses uniform mode so magnitude stays constant during the sweep.
         """
         cfg = ShiftConfig(
-            max_demand_shift = 0.3 * severity,
-            max_cost_shift   = 0.3 * severity,
-            min_availability = 1.0 - 0.3 * severity,
-            mode             = "uniform",
+            max_demand_shift  = 0.3 * severity,
+            max_cost_shift    = 0.3 * severity,
+            max_service_shift = 0.3 * severity,  # must scale with severity; default 0.3 leaks at φ=0
+            min_availability  = 1.0 - 0.3 * severity,
+            mode              = "uniform",
         )
         return ShiftScheduler(cfg, seed=self.seed)
 
