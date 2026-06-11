@@ -38,12 +38,14 @@ class AttentionDecoder(nn.Module):
         n_heads: int = 8,
         clip: float = 10.0,
         d_shift: int = 8,
+        use_budget_signal: bool = True,
     ):
         super().__init__()
 
         self.d_model = d_model
         self.clip = clip
         self.d_shift = d_shift
+        self.use_budget_signal = use_budget_signal
 
         # Context: cur_arc_emb(d_model) + cap(1) + time(1) + budget(1) + shift_emb(d_shift)
         ctx_in = d_model + 3 + d_shift
@@ -66,6 +68,9 @@ class AttentionDecoder(nn.Module):
         Returns log_probs [B, n+1].
         Infeasible positions have log_prob = -inf.
         """
+        if not self.use_budget_signal:
+            context = context.clone()
+            context[:, self.d_model + 2] = 0.0  # zero β_t for ablation
         h = self.ctx_proj(context).unsqueeze(1)  # [B, 1, d_model]
 
         attn_mask = ~mask  # True = ignore
