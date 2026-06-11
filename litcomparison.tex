@@ -1,0 +1,296 @@
+% ============================================================
+%  ShARC — Architecture Novelty & Literature Comparison
+%  Draft v1.0  |  Agriya  |  April 2026
+% ============================================================
+%
+%  Compile with: pdflatex sharc_arch_novelty.tex
+% ============================================================
+
+\documentclass[11pt]{article}
+
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\geometry{margin=1.1in}
+
+\newcommand{\CVaR}{\operatorname{CVaR}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+\title{\textbf{ShARC: Architecture Novelty \& Literature Comparison}\\
+\large How ShARC Differs from Existing Neural Combinatorial Optimisation Architectures}
+\author{Agriya \\ \small Ashoka University}
+\date{Draft --- \today}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\section{Overview}
+% ============================================================
+
+Neural combinatorial optimisation (NCO) for routing has converged on a
+standard encoder-decoder transformer architecture since Kool et
+al.~\cite{kool2019attention}.  ShARC adopts this backbone but departs from
+it in three principled ways that together address a research gap no existing
+work has closed: \emph{risk-sensitive arc routing under compound distribution
+shifts}.  This document situates ShARC within the NCO architecture landscape
+and identifies exactly where and why it is novel.
+
+% ============================================================
+\section{The Standard NCO Architecture and Its Limitations}
+% ============================================================
+
+\paragraph{Kool et al. (ICLR 2019)~\cite{kool2019attention}.}
+The attention model for CVRP uses a transformer encoder over node coordinates
+and a masked cross-attention pointer decoder.  It is trained via REINFORCE
+with a greedy rollout baseline.  This architecture is the foundation for
+virtually all subsequent NCO work and is the direct ancestor of ShARC's
+policy backbone.
+
+\textbf{Limitations for ShARC's setting:} (i)~it assumes a fixed,
+stationary instance distribution — the encoder is never conditioned on any
+shift signal; (ii)~it optimises expected tour length, not tail risk;
+(iii)~it is designed for node routing (VRP/TSP), not arc routing (CARP),
+where actions correspond to edges rather than nodes and feasibility masking
+must account for service demand along arcs.
+
+% ============================================================
+\section{Distribution-Shift NCO Architectures}
+% ============================================================
+
+\paragraph{DRO-VRP (AAAI 2022)~\cite{jiang2022dro}.}
+Applies group distributionally robust optimisation (group DRO) to the
+REINFORCE loss.  The model is a standard Kool et al.\ attention model;
+the DRO modification is purely at the loss level, reweighting training
+instances to focus on worst-case distribution groups.
+
+\textbf{Gap vs. ShARC:} DRO-VRP treats distribution shift as movement
+between a discrete set of pre-defined instance families.  It does not
+condition the policy on the current shift, does not model a continuous
+multi-parameter shift vector, and does not optimise a tail risk measure.
+The uncertainty set is over node coordinate distributions (rectangular),
+not over demand, cost, and availability jointly (non-rectangular).
+
+\paragraph{Omni-VRP (ICML 2023)~\cite{zhou2023omni}.}
+A meta-learning framework for generalisation across both instance size and
+distribution.  Uses MAML-style inner/outer loops to adapt the attention
+model to new distributions at test time.
+
+\textbf{Gap vs. ShARC:} Omni-VRP addresses cross-distribution
+generalisation but does not provide tail-risk guarantees and does not
+condition the policy on a shift context vector.  The uncertainty is over
+discrete distribution families, not a continuous shift parameterisation.
+
+\paragraph{SHIELD (ICML 2025)~\cite{goh2025shield}.}
+A multi-task, multi-distribution VRP solver using sparsity and hierarchical
+decoding to generalise across discretely enumerated VRP variants and
+distribution families simultaneously.
+
+\textbf{Gap vs. ShARC:} SHIELD handles a fixed, discrete set of
+distribution shifts and does not model continuous drift.  Its hierarchical
+decoding is designed for multi-task generalisation (different constraint
+types), not for tail-risk-sensitive behaviour under continuously shifting
+parameters.  SHIELD has no CVaR objective or risk-sensitive training signal.
+
+\paragraph{Collaboration (NeurIPS 2024)~\cite{zhou2024collaboration}.}
+An ensemble-based adversarial training framework that improves robustness
+of NCO models to input perturbations.  Multiple models are trained
+collaboratively to defend against crafted adversarial attacks on instance
+features.
+
+\textbf{Gap vs. ShARC:} Collaboration addresses adversarial robustness
+(worst-case input perturbations by an adversary) rather than distributional
+robustness (continuous stochastic shifts).  It does not model arc
+availability dropout, does not use a risk measure, and is designed for
+node routing.
+
+% ============================================================
+\section{Risk-Sensitive RL Architectures}
+% ============================================================
+
+\paragraph{Tamar et al. (AAAI 2015)~\cite{tamar2015optimizing}.}
+Derives the CVaR-REINFORCE gradient estimator for general MDPs and
+demonstrates it on small tabular and continuous control tasks.  No
+encoder-decoder architecture, no routing domain, no shift conditioning.
+
+\paragraph{Chow et al. (JMLR 2018)~\cite{chow2018risk}.}
+Actor-critic algorithms for CVaR-constrained MDPs via Lagrangian relaxation.
+The constraint is on the CVaR of cumulative cost; satisfaction is guaranteed
+in expectation but not in the tail under distribution shift.
+
+\textbf{Gap vs. ShARC:} Neither Tamar nor Chow et al.\ combine risk-sensitive
+RL with a transformer-based combinatorial optimisation policy or with a
+distribution shift model.  The connection between CVaR objectives and routing
+generalisation under compound shifts has not been studied.
+
+% ============================================================
+\section{Arc Routing Neural Methods}
+% ============================================================
+
+No prior NCO work addresses arc routing specifically.  The closest is the
+UCARP literature~\cite{mei2010carp}, which uses genetic programming
+hyper-heuristics to evolve routing policies under stochastic arc demands.
+
+\textbf{Gap vs. ShARC:} GP-based UCARP methods (i)~assume a fixed stochastic
+environment (demands drawn from fixed per-arc distributions), not a
+continuously drifting shift; (ii)~cannot be conditioned on a shift context
+vector; (iii)~do not optimise a tail risk measure; and (iv)~are not
+differentiable, precluding gradient-based training.
+
+% ============================================================
+\section{ShARC's Architectural Contributions}
+% ============================================================
+
+Table~\ref{tab:arch-comparison} summarises the architectural differences
+between ShARC and the most closely related prior work.
+
+\begin{table}[h!]
+\centering
+\small
+\caption{Architectural comparison of ShARC against related NCO and risk-sensitive RL methods.
+\checkmark = present; -- = absent.}
+\label{tab:arch-comparison}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{Arc routing} & \textbf{Shift context} & \textbf{CVaR objective} &
+\textbf{Continuous shift} & \textbf{Budget signal} \\
+\midrule
+Kool et al.~\cite{kool2019attention}    & -- & -- & -- & -- & -- \\
+DRO-VRP~\cite{jiang2022dro}             & -- & -- & -- & -- & -- \\
+Omni-VRP~\cite{zhou2023omni}            & -- & -- & -- & -- & -- \\
+SHIELD~\cite{goh2025shield}             & -- & -- & -- & -- & -- \\
+Collaboration~\cite{zhou2024collaboration} & -- & -- & -- & -- & -- \\
+Tamar et al.~\cite{tamar2015optimizing} & -- & -- & \checkmark & -- & -- \\
+Chow et al.~\cite{chow2018risk}         & -- & -- & \checkmark & -- & -- \\
+UCARP / GP~\cite{mei2010carp}           & \checkmark & -- & -- & -- & -- \\
+\midrule
+\textbf{ShARC (ours)} & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+ShARC introduces three specific architectural novelties not present in any
+prior work:
+
+\begin{enumerate}
+    \item \textbf{Shift context injection into the decoder.}
+    The decoder context vector explicitly includes a learned projection of
+    the current episode's shift vector $\phivec = (\delta_d, \delta_c,
+    \delta_p)$.  This allows the policy to adapt its routing decisions
+    to the \emph{type and severity} of the current shift, not just to
+    average over shifts.  No prior NCO architecture conditions the decoder
+    on a continuous distributional shift signal.
+
+    \item \textbf{Budget variable in the decoder context.}
+    The running maximum vehicle time $\beta_t = \max_k \tau_{k,t}$ is
+    included in the decoder context at every step.  This gives the policy
+    an explicit signal about its current worst-case cost trajectory,
+    enabling risk-sensitive routing decisions within the episode --- for
+    example, preferring to service high-priority arcs early when the budget
+    is already tight.  No prior routing NCO method includes a within-episode
+    risk budget signal.
+
+    \item \textbf{CVaR-REINFORCE with tail-normalised gradients for
+    combinatorial optimisation.}
+    The CVaR-REINFORCE estimator of Tamar et al.\ is adapted to the HCARP
+    setting with two modifications: (i)~the greedy rollout CVaR (rather than
+    mean) is used as the baseline to ensure tail-consistent advantage
+    estimation; and (ii)~advantage normalisation is applied within the
+    worst-$\alpha$ tail to prevent gradient magnitude collapse under the
+    large raw makespans typical of arc routing instances.  This combination
+    has not been applied in any prior NCO work.
+\end{enumerate}
+
+\begin{remark}[What ShARC does \emph{not} claim as novel]
+The transformer encoder-decoder backbone, pointer network, and REINFORCE
+training loop are all inherited from~\cite{kool2019attention} and are not
+claimed as contributions.  The novelty is in the specific combination of
+(a)~arc routing domain, (b)~continuous compound shift model, (c)~shift
+context injection, (d)~budget variable, and (e)~CVaR tail objective.
+\end{remark}
+
+% ============================================================
+\section{Research Gap Summary}
+% ============================================================
+
+The gap ShARC addresses can be stated precisely: \emph{no existing work
+optimises a tail risk measure for arc routing under a continuous,
+multi-parameter distribution shift, nor conditions a neural routing policy
+on an explicit shift context to enable shift-aware decision-making.}
+
+More specifically:
+\begin{itemize}
+    \item Existing NCO distribution-shift methods (DRO-VRP, SHIELD,
+    Collaboration, Omni-VRP) address VRP not CARP, use discrete not
+    continuous shift models, and optimise expected not tail performance.
+    \item Existing CVaR RL methods (Tamar, Chow) do not apply to
+    combinatorial optimisation and do not model distribution shift.
+    \item Existing UCARP methods use evolutionary not gradient-based methods,
+    assume fixed not drifting environments, and do not condition on shift.
+\end{itemize}
+
+ShARC is the first work to sit at all three intersections simultaneously:
+arc routing $\cap$ neural RL policy $\cap$ CVaR under continuous distribution
+shift.
+
+% ============================================================
+%  Bibliography
+% ============================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{kool2019attention}
+W.~Kool, H.~van Hoof, and M.~Welling.
+\newblock Attention, learn to solve routing problems!
+\newblock In \emph{Proc. ICLR}, 2019.
+
+\bibitem{jiang2022dro}
+Y.~Jiang, Y.~Wu, Z.~Cao, and J.~Zhang.
+\newblock Learning to solve routing problems via distributionally robust
+  optimization.
+\newblock In \emph{Proc. AAAI}, 2022.
+
+\bibitem{zhou2023omni}
+J.~Zhou, Y.~Wu, W.~Song, Z.~Cao, and J.~Zhang.
+\newblock Towards omni-generalizable neural methods for vehicle routing
+  problems.
+\newblock In \emph{Proc. ICML}, 2023.
+
+\bibitem{goh2025shield}
+Y.~L.~Goh, Z.~Cao, Y.~Ma, J.~Zhou, M.~H.~Dupty, and W.~S.~Lee.
+\newblock {SHIELD}: Multi-task multi-distribution vehicle routing solver with
+  sparsity and hierarchy.
+\newblock In \emph{Proc. ICML}, 2025.
+
+\bibitem{zhou2024collaboration}
+J.~Zhou, Y.~Wu, Z.~Cao, W.~Song, J.~Zhang, and Z.~Shen.
+\newblock Collaboration! towards robust neural methods for routing problems.
+\newblock In \emph{Proc. NeurIPS}, 2024.
+
+\bibitem{tamar2015optimizing}
+A.~Tamar, Y.~Glassner, and S.~Mannor.
+\newblock Optimizing the {CVaR} via sampling.
+\newblock In \emph{Proc. AAAI}, 2015.
+
+\bibitem{chow2018risk}
+Y.~Chow, M.~Ghavamzadeh, L.~Janson, and M.~Pavone.
+\newblock Risk-constrained reinforcement learning with percentile risk
+  criteria.
+\newblock \emph{Journal of Machine Learning Research}, 18(167):1--51, 2018.
+
+\bibitem{mei2010carp}
+Y.~Mei, K.~Tang, and X.~Yao.
+\newblock Capacitated arc routing problem in uncertain environments.
+\newblock In \emph{Proc. IEEE CEC}, 2010.
+
+\bibitem{bello2016neural}
+I.~Bello, H.~Pham, Q.~V.~Le, M.~Norouzi, and S.~Bengio.
+\newblock Neural combinatorial optimization with reinforcement learning.
+\newblock In \emph{Proc. ICLR Workshop}, 2017.
+
+\end{thebibliography}
+
+\end{document}
