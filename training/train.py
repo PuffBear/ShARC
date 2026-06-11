@@ -31,6 +31,13 @@ from models.policy import HCARPPolicy
 from training.configs.default import CFG
 
 
+def _get_env_class(problem: str):
+    if problem == "cvrp":
+        from env.cvrp_env import CVRPEnv
+        return CVRPEnv
+    return HCARPEnv
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -163,11 +170,13 @@ def train_batch(
     shift_scheduler=None,
     use_cvar: bool = False,
     alpha: float = 0.1,
+    env_class=None,
 ) -> dict:
     """
     Run one REINFORCE (or CVaR-REINFORCE) update on a batch of instances.
     """
-    env = HCARPEnv(shift_scheduler=shift_scheduler)
+    EnvClass = env_class or HCARPEnv
+    env = EnvClass(shift_scheduler=shift_scheduler)
     env.load_files(files)
 
     # --- Stochastic rollout (with gradient) ---
@@ -214,11 +223,13 @@ def validate(
     files: list[str],
     batch_size: int,
     shift_scheduler=None,
+    env_class=None,
 ) -> dict:
     all_rewards, T1s, T2s, T3s = [], [], [], []
+    EnvClass = env_class or HCARPEnv
 
     for batch in make_batches(files, batch_size, shuffle=False):
-        env = HCARPEnv(shift_scheduler=shift_scheduler)
+        env = EnvClass(shift_scheduler=shift_scheduler)
         env.load_files(batch)
         env.reset()
         _, _, rewards, info = policy.rollout(env, greedy=True)
@@ -261,17 +272,19 @@ def train(cfg: dict):
     train_files, val_files = split_files(all_files, cfg["val_split"], cfg["seed"])
     print(f"Instances — train: {len(train_files)}  val: {len(val_files)}")
 
-    d_shift = cfg.get("d_shift", 8) if cfg.get("use_shift") else 0
+    env_class = _get_env_class(cfg.get("problem", "hcarp"))
+    d_shift   = cfg.get("d_shift", 8) if cfg.get("use_shift") else 0
 
     policy = HCARPPolicy(
-        d_model      = cfg["d_model"],
-        n_heads      = cfg["n_heads"],
-        n_enc_layers = cfg["n_enc_layers"],
-        d_ff         = cfg["d_ff"],
-        d_clss       = cfg["d_clss"],
-        clip         = cfg["clip"],
-        d_shift      = d_shift,
-        device       = cfg["device"],
+        d_model           = cfg["d_model"],
+        n_heads           = cfg["n_heads"],
+        n_enc_layers      = cfg["n_enc_layers"],
+        d_ff              = cfg["d_ff"],
+        d_clss            = cfg["d_clss"],
+        clip              = cfg["clip"],
+        d_shift           = d_shift,
+        use_budget_signal = cfg.get("use_budget_signal", True),
+        device            = cfg["device"],
     )
     n_params = sum(p.numel() for p in policy.parameters())
     print(f"Policy parameters: {n_params:,}  (d_shift={d_shift})")
@@ -305,6 +318,7 @@ def train(cfg: dict):
                 shift_scheduler=shift_scheduler,
                 use_cvar=use_cvar,
                 alpha=alpha,
+                env_class=env_class,
             )
             epoch_metrics.append(m)
             if shift_scheduler is not None:
@@ -324,7 +338,7 @@ def train(cfg: dict):
 
         if epoch % cfg["validate_every"] == 0:
             policy.eval()
-            val = validate(policy, val_files, cfg["batch_size"], shift_scheduler)
+            val = validate(policy, val_files, cfg["batch_size"], shift_scheduler, env_class=env_class)
             print(
                 f"  [val] reward {val['val_reward']:10.1f} | "
                 f"T1 {val['val_T1']:.3f}  T2 {val['val_T2']:.3f}  T3 {val['val_T3']:.3f}"
