@@ -4,6 +4,9 @@ Import and override as needed.
 """
 
 CFG = dict(
+    # --- Problem ---
+    problem        = "hcarp",    # "hcarp" | "cvrp" — selects the env class
+
     # --- Data ---
     data_dir       = "data/test_dataset",
     val_split      = 0.1,
@@ -41,6 +44,9 @@ CFG = dict(
     checkpoint_dir    = "experiments/results",
     run_name          = "reinforce_default",
     warm_start_ckpt   = None,   # path to checkpoint for warm-start (None = train from scratch)
+
+    # --- Ablation flags ---
+    use_budget_signal = True,   # False = zero out β_t in decoder (ablation)
 
     # --- Device ---
     device         = "cpu",
