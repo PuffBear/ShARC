@@ -92,13 +92,23 @@ def unbatchify_and_gather(x, idx, n):
     return gather_by_index(x, idx, dim=idx.dim())
 
     
+import os
+_GLOBAL_THREAD_POOL = None
+
 def run_parallel(operation, *args, **kwargs):
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(operation, *param_set, **kwargs) for param_set in zip(*args)]
-        return [f.result() for f in futures]
+    global _GLOBAL_THREAD_POOL
+    if _GLOBAL_THREAD_POOL is None:
+        _GLOBAL_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=min(os.cpu_count() or 8, 8))
+    futures = [_GLOBAL_THREAD_POOL.submit(operation, *param_set, **kwargs) for param_set in zip(*args)]
+    return [f.result() for f in futures]
 
 def run_parallel2(operation, *args, **kwargs):
-    with concurrent.futures.ProcessPoolExecutor(50) as executor:
+    # Fixed: Spawning 50 ProcessPool workers inside a tight epoch loop on an 8-core HPC node
+    # causes severe OS thrashing. Additionally, concurrent Numba JIT compilation across 
+    # 50 forks causes LLVM lock deadlocks. Switch to ThreadPoolExecutor with matching core count.
+    import os
+    workers = min(os.cpu_count() or 8, 8)
+    with concurrent.futures.ThreadPoolExecutor(workers) as executor:
         futures = [executor.submit(operation, *param_set, **kwargs) for param_set in zip(*args)]
     
     return [f.result() for f in futures]
