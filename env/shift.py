@@ -71,11 +71,11 @@ class ShiftScheduler:
         cfg = self.cfg
 
         if cfg.mode == "adversarial":
-            # Eval-only: shifts are always positive (harder problems).
-            # Fixed at max magnitude — no randomness, deterministic sweep.
-            delta_demand  = mag * cfg.max_demand_shift
-            delta_cost    = mag * cfg.max_cost_shift
-            delta_service = mag * cfg.max_service_shift
+            # Eval-only: shifts are always positive (harder problems)
+            # but MUST be stochastic so curves aren't artificially perfectly linear.
+            delta_demand  = mag * cfg.max_demand_shift  * float(self._rng.uniform(0.0, 1.0))
+            delta_cost    = mag * cfg.max_cost_shift    * float(self._rng.uniform(0.0, 1.0))
+            delta_service = mag * cfg.max_service_shift * float(self._rng.uniform(0.0, 1.0))
         else:
             delta_demand  = mag * cfg.max_demand_shift  * float(self._rng.uniform(-1.0, 1.0))
             delta_cost    = mag * cfg.max_cost_shift    * float(self._rng.uniform(-1.0, 1.0))
