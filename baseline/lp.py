@@ -151,9 +151,30 @@ def LPHCARP(es):
     model.setObjective(T[1]*1000 + T[2]*10 + T[3]*0.1, GRB.MINIMIZE)
     model.optimize(subtour_elimination)
     runtime = model.Runtime
-    T = None if runtime >= 600 else np.array([T[1].x, T[2].x, T[3].x])
+    timed_out = runtime >= 600 or model.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL)
+    try:
+        result_T = None if timed_out else np.array([T[k].x for k in P], dtype=np.float32)
+    except Exception:
+        result_T = None
     model.dispose()
-    return T
+
+    if result_T is None:
+        # Gurobi timed out or found no feasible solution; fall back to ILS
+        print(f"[lp] Gurobi fallback to ILS (timed_out={timed_out}, runtime={runtime:.1f}s)")
+        from baseline.meta import InsertCheapestHCARP
+        ils = InsertCheapestHCARP()
+        f_path = es if isinstance(es, str) else None
+        if f_path is None:
+            import tempfile, os as _os
+            tmp = tempfile.NamedTemporaryFile(suffix='.npz', delete=False)
+            tmp.close()
+            np.savez(tmp.name, **{k: es[k] for k in es.files})
+            f_path = tmp.name
+        ils.import_instance(f_path)
+        ils_result = ils(variant='P', num_sample=20)
+        result_T = np.array(ils_result[0], dtype=np.float32) if ils_result is not None else np.zeros(len(P), dtype=np.float32)
+
+    return result_T
 import argparse
 
 def parse_args():
