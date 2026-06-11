@@ -18,13 +18,24 @@ def parse_args():
     
     return parser.parse_args()
 
+import concurrent.futures
+
+def process_file(f, args):
+    al = InsertCheapestHCARP()
+    al.import_instance(f)
+    t1 = time()
+    res = al(variant=args.variant, num_sample=args.num_sample)
+    return f, res, time() - t1
+
 if __name__ == "__main__":
     args = parse_args()
     np.random.seed(args.seed)
     files = sorted(glob(args.path + '/*/*.npz'))
 
-    al = InsertCheapestHCARP() # ILS
-    for f in files:
-        al.import_instance(f)
-        t1 = time()
-        print(f,':::', al(variant=args.variant, num_sample=args.num_sample),':::', time() - t1)
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=min(os.cpu_count() or 8, 8), mp_context=ctx) as pool:
+        futures = [pool.submit(process_file, f, args) for f in files]
+        for fut in concurrent.futures.as_completed(futures):
+            f, res, dt = fut.result()
+            print(f, ':::', res, ':::', dt)
